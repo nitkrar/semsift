@@ -1,0 +1,118 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        # 3.11 is the floor in pyproject, and the only place it is exercised.
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+
+    env:
+      # No test may reach the network; this makes a violation fail here
+      # rather than pass locally off a warm cache.
+      HF_HUB_OFFLINE: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: install
+        run: python -m pip install --quiet '.[static,tree-sitter]'
+
+      - name: tests
+        run: python -m unittest discover -s tests -t .
+
+  # The golden-vector and ONNX tests need real models, which the offline
+  # matrix above does not have, so they skip there. This job fetches the
+  # models and fails if those tests skip anyway.
+  models:
+    name: golden vectors and onnx
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ hashFiles('tests/golden/models.py') }}
+
+      - name: install
+        run: python -m pip install --quiet '.[static,onnx]'
+
+      # Through the same constructors the tests use, so the set of files
+      # each model needs is decided in one place.
+      - name: fetch the models
+        run: |
+          python -c "
+          from semsift.embed import OnnxEncoder, StaticEncoder
+          from tests.golden.models import MODELS
+          for model, backend in MODELS:
+              StaticEncoder(model) if backend == 'static' else OnnxEncoder(model, providers='cpu')
+          "
+
+      - name: tests
+        env:
+          HF_HUB_OFFLINE: "1"
+        run: |
+          python -m unittest -v tests.golden.test_golden_vectors \
+            tests.embed.test_backends.OnnxEncoderTests 2>&1 | tee out.txt
+          # unittest exits 0 on a skip, so the failure this job exists to
+          # catch is the tests not running. A skip here usually means the
+          # hub's model moved past the recorded snapshot: regenerate with
+          # python -m tests.golden.make_vectors.
+          if grep -q skipped out.txt; then
+            echo "::error::model tests skipped; this job exists to run them"
+            exit 1
+          fi
+
+  # TreeSitterChunker tests skip when no grammar is on disk, which is
+  # every runner until something downloads one.
+  grammars:
+    name: tree-sitter chunking
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: install
+        run: python -m pip install --quiet '.[tree-sitter]'
+
+      # get_parser, not download(): in pack 1.20.0, download() reports
+      # success without leaving a grammar that downloaded_languages() lists.
+      - name: fetch grammars
+        run: |
+          python -c "
+          import tree_sitter_language_pack as p
+          for language in ('python', 'markdown'):
+              p.get_parser(language)
+          assert {'python', 'markdown'} <= set(p.downloaded_languages())
+          "
+
+      - name: tests
+        run: |
+          python -m unittest -v tests.chunk.test_chunkers 2>&1 | tee out.txt
+          if grep -q skipped out.txt; then
+            echo "::error::tree-sitter tests skipped; this job exists to run them"
+            exit 1
+          fi

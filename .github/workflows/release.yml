@@ -1,0 +1,59 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  pypi:
+    name: publish semsift to PyPI
+    runs-on: ubuntu-latest
+    permissions:
+      # Trusted publishing: PyPI verifies this workflow's OIDC identity, so no
+      # API token exists to leak or rotate. Configured on pypi.org, not here.
+      id-token: write
+      contents: write        # the release this tag becomes
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: install
+        run: python -m pip install --quiet '.[static,tree-sitter]'
+
+      - name: tests
+        env:
+          HF_HUB_OFFLINE: "1"
+        run: python -m unittest discover -s tests -t .
+
+      - name: build
+        run: |
+          python -m pip install --quiet build
+          python -m build
+
+      - name: the tag, __version__ and both artifacts must agree
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          declared=$(python -c "import semsift; print(semsift.__version__)")
+          sdist=$(ls dist/semsift-*.tar.gz | sed 's|.*/semsift-\(.*\)\.tar\.gz|\1|')
+          wheel=$(ls dist/semsift-*.whl | sed 's|.*/semsift-\([^-]*\)-.*|\1|')
+          for v in "$declared" "$sdist" "$wheel"; do
+            test "$tag" = "$v" || {
+              echo "tag $tag but found $v (declared $declared, sdist $sdist, wheel $wheel)" >&2
+              exit 1
+            }
+          done
+
+      # Fails rather than skips on a version already on PyPI, so a re-run
+      # cannot publish a different artifact under an existing version.
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" dist/* --generate-notes --title "$TAG"

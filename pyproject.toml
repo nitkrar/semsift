@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "semsift"
+dynamic = ["version"]
+description = "Building blocks for hybrid keyword and vector retrieval over SQLite"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+    "numpy>=1.26",
+    "vicinity>=0.4.6",
+]
+
+[project.optional-dependencies]
+static = ["model2vec>=0.9", "huggingface-hub>=0.23"]
+tree-sitter = ["tree-sitter-language-pack>=1.20"]
+onnx = ["onnxruntime>=1.17", "huggingface-hub>=0.23", "tokenizers>=0.15"]
+webgpu = [
+    "onnxruntime>=1.24.4",
+    "onnxruntime-ep-webgpu",
+    "huggingface-hub>=0.23",
+    "tokenizers>=0.15",
+]
+
+[project.urls]
+Source = "https://github.com/nitkrar/semsift"
+
+[tool.setuptools.dynamic]
+version = { attr = "semsift.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
