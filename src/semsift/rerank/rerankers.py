@@ -198,6 +198,29 @@ class Rules:
         return _by_score(out)
 
 
+class Multiply:
+    """Multiplies each score by `fn(candidate)`.
+
+    For weights a consumer computes in code, such as penalties by path;
+    `Rules` does the same from rules held as data. `needs` names the
+    candidate fields `fn` reads. Each factor must be finite and positive.
+    """
+
+    def __init__(self, fn: Callable[[Candidate], float],
+                 needs: frozenset[str] | set[str] = frozenset()) -> None:
+        self.fn = fn
+        self.needs = frozenset(needs)
+
+    def rerank(self, query: str, candidates: Sequence[Candidate]) -> list[Candidate]:
+        out = []
+        for c in candidates:
+            factor = self.fn(c)
+            if not (math.isfinite(factor) and factor > 0):
+                raise ValueError(f"a factor must be finite and positive, got {factor}")
+            out.append(replace(c, score=c.score * factor))
+        return _by_score(out)
+
+
 class MMR:
     """Maximal marginal relevance: relevance traded against redundancy.
 

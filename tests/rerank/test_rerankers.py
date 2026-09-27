@@ -135,5 +135,30 @@ class MMRTests(unittest.TestCase):
             MMR().rerank("q", [Candidate(1, 1.0)])
 
 
+
+class MultiplyTests(unittest.TestCase):
+    def test_scores_are_multiplied_and_resorted(self) -> None:
+        from semsift.rerank import Multiply
+
+        m = Multiply(lambda c: 0.1 if c.metadata["path"].startswith("tests/") else 1.0,
+                     needs={"metadata"})
+        got = m.rerank("q", cands((1, 1.0), (2, 0.5), path=["tests/a.py", "src/b.py"]))
+        self.assertEqual([2, 1], [c.id for c in got])
+        self.assertAlmostEqual(0.1, got[1].score)
+        self.assertEqual(frozenset({"metadata"}), m.needs)
+
+    def test_equal_scores_keep_their_incoming_order(self) -> None:
+        from semsift.rerank import Multiply
+
+        got = Multiply(lambda c: 1.0).rerank("q", cands((3, 1.0), (1, 1.0)))
+        self.assertEqual([3, 1], [c.id for c in got])
+
+    def test_a_factor_must_be_finite_and_positive(self) -> None:
+        from semsift.rerank import Multiply
+
+        for bad in (0.0, -1.0, math.inf, math.nan):
+            with self.assertRaises(ValueError, msg=bad):
+                Multiply(lambda c, bad=bad: bad).rerank("q", cands((1, 1.0)))
+
 if __name__ == "__main__":
     unittest.main()

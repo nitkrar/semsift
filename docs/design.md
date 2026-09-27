@@ -253,6 +253,7 @@ unique. When reranking leaves fewer than `k`, the result has fewer than
 | recency | a declared timestamp field (UTC epoch seconds) | multiplies score by `0.5 ** (age / half_life)`; the clock is injectable; a missing timestamp takes a configured factor; a future timestamp counts as age 0 |
 | MMR | vectors | trades relevance against similarity to hits already chosen; relevance is min-max normalised before mixing |
 | metadata rules | declared fields | multiplies score by each matching rule's factor; matches compound; factors are finite and positive |
+| multiply | what `fn` reads | multiplies score by `fn(candidate)`, for weights computed in code (repoglass's path penalties); factors are finite and positive |
 
 Recency ranks; it does not decide what is current. A consumer with
 superseded records (the knowledge store's memories) filters inactive
