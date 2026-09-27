@@ -1,4 +1,4 @@
-"""TextChunker and TreeSitterChunker: coverage, bounds, spans, fallback."""
+"""TextChunker and TreeSitterPackChunker: coverage, bounds, spans, fallback."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from semsift.chunk import Chunk, TextChunker, TreeSitterChunker
+from semsift.chunk import Chunk, TextChunker, TreeSitterPackChunker
 
 PROSE = ("# Lease\n\nThe landlord renewed the lease for flat 4B.\nRent is unchanged.\n\n"
          "## Deposit\n\nThe deposit is protected with the scheme.\n\n"
@@ -115,11 +115,11 @@ def grammar(language: str) -> bool:
 class TreeSitterChunkerTests(unittest.TestCase):
     def test_blank_text_tiles_when_min_chars_is_zero(self) -> None:
         text = " \n \n"
-        chunks = TreeSitterChunker(max_chars=3, min_chars=0).chunk(text, "python")
+        chunks = TreeSitterPackChunker(target_chars=3, min_chars=0).chunk(text, "python")
         self.assertEqual(text, "".join(c.text for c in chunks))
 
     def test_spans_tile_the_source_and_stay_within_the_bound(self) -> None:
-        chunks = TreeSitterChunker(max_chars=400, min_chars=0).chunk(CODE, "python")
+        chunks = TreeSitterPackChunker(target_chars=400, min_chars=0).chunk(CODE, "python")
         assert_spans(self, CODE, chunks)
         self.assertEqual(0, chunks[0].start)
         self.assertEqual(len(CODE), chunks[-1].end)
@@ -129,21 +129,21 @@ class TreeSitterChunkerTests(unittest.TestCase):
         self.assertTrue(all(len(c.text.encode()) <= 400 for c in chunks))
 
     def test_no_method_is_cut_through_the_middle(self) -> None:
-        chunks = TreeSitterChunker(max_chars=400, min_chars=0).chunk(CODE, "python")
+        chunks = TreeSitterPackChunker(target_chars=400, min_chars=0).chunk(CODE, "python")
         for c in chunks:
             for i in range(25):
                 if f"def m{i}(" in c.text:
                     self.assertIn(f"compute_value_{i}()", c.text)
 
     def test_chunks_carry_their_enclosing_context_and_symbols(self) -> None:
-        chunks = TreeSitterChunker(max_chars=400, min_chars=0).chunk(CODE, "python")
+        chunks = TreeSitterPackChunker(target_chars=400, min_chars=0).chunk(CODE, "python")
         methods = [c for c in chunks if "def m3(" in c.text][0]
         self.assertEqual(("Big",), methods.context)
         self.assertIn("m3", methods.symbols)
 
     def test_offsets_are_characters_not_bytes(self) -> None:
         text = "s = 'héllo wörld ünïcode'\n" * 40
-        chunks = TreeSitterChunker(max_chars=200, min_chars=0).chunk(text, "python")
+        chunks = TreeSitterPackChunker(target_chars=200, min_chars=0).chunk(text, "python")
         assert_spans(self, text, chunks)
         self.assertEqual(len(text), chunks[-1].end)
 
@@ -151,26 +151,26 @@ class TreeSitterChunkerTests(unittest.TestCase):
         text = ("label = 'éééééééééé'\n\nclass Café:\n"
                 + "".join(f"    def méthode_{i}(self):\n        return {i}\n\n"
                           for i in range(12)))
-        chunks = TreeSitterChunker(max_chars=160, min_chars=0).chunk(text, "python")
+        chunks = TreeSitterPackChunker(target_chars=160, min_chars=0).chunk(text, "python")
         method = next(c for c in chunks if "def méthode_6(" in c.text)
         self.assertEqual(("Café",), method.context)
         self.assertIn("méthode_6", method.symbols)
 
     def test_an_unknown_language_falls_back_to_text_chunking(self) -> None:
-        ts = TreeSitterChunker(max_chars=200, min_chars=0)
+        ts = TreeSitterPackChunker(target_chars=200, min_chars=0)
         self.assertFalse(ts.supports("no-such-language"))
         self.assertEqual(TextChunker(max_chars=200, min_chars=0, markdown=False).chunk(PROSE),
                          ts.chunk(PROSE, "no-such-language"))
 
     def test_a_syntax_error_still_chunks(self) -> None:
         text = "def f(:\n  return (\n\nclass X\n"
-        chunks = TreeSitterChunker(max_chars=200, min_chars=0).chunk(text, "python")
+        chunks = TreeSitterPackChunker(target_chars=200, min_chars=0).chunk(text, "python")
         self.assertEqual(text, "".join(c.text for c in chunks))
 
     def test_pack_failures_fall_back_to_text_chunking(self) -> None:
         import tree_sitter_language_pack as pack
 
-        ts = TreeSitterChunker(max_chars=200, min_chars=0)
+        ts = TreeSitterPackChunker(target_chars=200, min_chars=0)
         with patch.object(pack, "process", side_effect=pack.ParseFailedError("failed")):
             self.assertEqual(TextChunker(max_chars=200, min_chars=0).chunk(CODE),
                              ts.chunk(CODE, "python"))
@@ -180,7 +180,21 @@ class TreeSitterChunkerTests(unittest.TestCase):
 
         with patch.object(pack, "process", side_effect=RuntimeError("bug")):
             with self.assertRaisesRegex(RuntimeError, "bug"):
-                TreeSitterChunker(max_chars=200, min_chars=0).chunk(CODE, "python")
+                TreeSitterPackChunker(target_chars=200, min_chars=0).chunk(CODE, "python")
+
+    def test_small_pack_pieces_merge_up_to_the_target(self) -> None:
+        # Decorators and docstrings come back from the pack as pieces of a
+        # few dozen characters next to much larger ones.
+        text = ('"""Module doc."""\n\nimport os\nimport sys\n\n\n' + "".join(
+            f'@decorator("case_{i}")\ndef check_{i}(value: str) -> None:\n'
+            f'    """Check {i}."""\n'
+            + "".join(f"    step_{j} = compute_{j}(value)\n" for j in range(12)) + "\n\n"
+            for i in range(4)))
+        chunks = TreeSitterPackChunker(target_chars=400, min_chars=0).chunk(text, "python")
+        sizes = [len(c.text) for c in chunks]
+        self.assertTrue(all(s <= 400 for s in sizes), sizes)
+        # Merging is complete: no two neighbours fit together in the target.
+        self.assertTrue(all(a + b > 400 for a, b in zip(sizes, sizes[1:])), sizes)
 
     def test_incomplete_pack_output_falls_back_to_bounded_chunks(self) -> None:
         import tree_sitter_language_pack as pack
@@ -188,7 +202,7 @@ class TreeSitterChunkerTests(unittest.TestCase):
         result = SimpleNamespace(chunks=[SimpleNamespace(start_byte=0, metadata=None)])
         text = "x" * 500
         with patch.object(pack, "process", return_value=result):
-            chunks = TreeSitterChunker(max_chars=100, min_chars=0).chunk(text, "python")
+            chunks = TreeSitterPackChunker(target_chars=100, min_chars=0).chunk(text, "python")
         self.assertEqual(text, "".join(c.text for c in chunks))
         self.assertTrue(all(len(c.text) <= 100 for c in chunks))
 
@@ -205,20 +219,20 @@ class MarkdownSwitchTests(unittest.TestCase):
         self.assertGreater(len(TextChunker(max_chars=200, min_chars=0).chunk(self.CODE)), 1)
 
     def test_the_tree_sitter_fallback_does_not_read_markdown(self) -> None:
-        self.assertFalse(TreeSitterChunker().fallback.markdown)
+        self.assertFalse(TreeSitterPackChunker().fallback.markdown)
 
 
 @unittest.skipUnless(grammar("python"), "tree-sitter extra or python grammar not installed")
 class LimitTests(unittest.TestCase):
     def test_a_source_over_the_byte_limit_is_chunked_as_text(self) -> None:
-        ts = TreeSitterChunker(max_chars=200, min_chars=0, max_source_bytes=100)
+        ts = TreeSitterPackChunker(target_chars=200, min_chars=0, max_source_bytes=100)
         self.assertEqual(ts.fallback.chunk(CODE), ts.chunk(CODE, "python"))
 
     def test_the_source_limit_counts_utf8_bytes_not_characters(self) -> None:
         import tree_sitter_language_pack as pack
 
         text = "é" * 60
-        ts = TreeSitterChunker(max_chars=200, min_chars=0, max_source_bytes=100)
+        ts = TreeSitterPackChunker(target_chars=200, min_chars=0, max_source_bytes=100)
         with patch.object(pack, "process", side_effect=AssertionError("must not parse")):
             self.assertEqual(ts.fallback.chunk(text), ts.chunk(text, "python"))
 
@@ -235,18 +249,18 @@ class LimitTests(unittest.TestCase):
             return real(text, config)
 
         with mock.patch.object(pack, "process", spy):
-            TreeSitterChunker(max_source_bytes=10_000, parse_timeout_ms=1234).chunk(CODE, "python")
+            TreeSitterPackChunker(max_source_bytes=10_000, parse_timeout_ms=1234).chunk(CODE, "python")
         self.assertEqual([(10_000, 1234)], seen)
 
     def test_defaults_are_set(self) -> None:
-        ts = TreeSitterChunker()
+        ts = TreeSitterPackChunker()
         self.assertEqual((5_000_000, 5_000), (ts.max_source_bytes, ts.parse_timeout_ms))
 
     def test_limits_must_be_positive_integers(self) -> None:
         for name in ("max_source_bytes", "parse_timeout_ms"):
             for value in (0, -1, True, 1.5):
                 with self.subTest(name=name, value=value), self.assertRaises(ValueError):
-                    TreeSitterChunker(**{name: value})
+                    TreeSitterPackChunker(**{name: value})
 
     def test_a_timeout_or_failed_download_falls_back_to_text(self) -> None:
         from unittest import mock
@@ -254,7 +268,7 @@ class LimitTests(unittest.TestCase):
         import tree_sitter_language_pack as pack
 
         for error in (pack.ParseTimeoutError("slow"), pack.DownloadError("offline")):
-            ts = TreeSitterChunker(max_chars=200, min_chars=0)
+            ts = TreeSitterPackChunker(target_chars=200, min_chars=0)
             with mock.patch.object(pack, "process", side_effect=error):
                 self.assertEqual(ts.fallback.chunk(CODE), ts.chunk(CODE, "python"), repr(error))
 

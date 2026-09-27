@@ -39,11 +39,11 @@ def _build(text: str, spans: list[tuple[int, int]], min_chars: int,
     return out
 
 
-def _check(max_chars: int, min_chars: int) -> None:
-    if max_chars <= 0:
-        raise ValueError("max_chars must be positive")
-    if not 0 <= min_chars <= max_chars:
-        raise ValueError("min_chars must be between 0 and max_chars")
+def _check(size: int, min_chars: int, name: str = "max_chars") -> None:
+    if size <= 0:
+        raise ValueError(f"{name} must be positive")
+    if not 0 <= min_chars <= size:
+        raise ValueError(f"min_chars must be between 0 and {name}")
 
 
 class TextChunker:
@@ -97,10 +97,146 @@ class TextChunker:
         return _build(text, self.spans(text), self.min_chars)
 
 
-class TreeSitterChunker:
+#: A node smaller than this is emitted whole rather than descended into.
+_MIN_NODE_BYTES = 50
+#: Recursion bound for pathological nesting.
+_MAX_DEPTH = 500
+
+
+class LanguagePackChunker:
+    """Syntax-aligned windows from our own walk of a tree-sitter parse.
+
+    Groups adjacent sibling nodes until the next would pass
+    `target_bytes`, descends into any node bigger than that, then merges
+    neighbouring groups back up towards the target. `target_bytes` is an
+    aim; a node that cannot be split can exceed it, up to `max_bytes`,
+    where it is cut. Sizes are UTF-8 bytes, as the tree reports them.
+    Chunks cover syntax nodes, so whitespace between groups belongs to no
+    chunk; chunks whose stripped text is shorter than `min_chars` are
+    dropped.
+
+    Needs the `tree-sitter` extra. A language the pack does not list, a
+    grammar it cannot download, a parse failure, or a source over
+    `max_source_bytes` falls back to `fallback`: a TextChunker that does
+    not read markdown, by default.
+    """
+
+    def __init__(self, target_bytes: int = 750, max_bytes: int = 20_000,
+                 min_chars: int = 1, fallback: TextChunker | None = None, *,
+                 max_source_bytes: int = 5_000_000) -> None:
+        try:
+            import tree_sitter_language_pack  # noqa: F401
+        except ImportError as exc:
+            raise ImportError("LanguagePackChunker needs the tree-sitter extra:"
+                              " pip install 'semsift[tree-sitter]'") from exc
+        for name, value in (("target_bytes", target_bytes), ("max_bytes", max_bytes),
+                            ("max_source_bytes", max_source_bytes)):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        if max_bytes < 4:
+            raise ValueError("max_bytes must fit one UTF-8 character")
+        if max_bytes < target_bytes:
+            raise ValueError("max_bytes must be at least target_bytes")
+        if isinstance(min_chars, bool) or not isinstance(min_chars, int) or min_chars < 0:
+            raise ValueError("min_chars must be a non-negative integer")
+        if min_chars > max_bytes:
+            raise ValueError("min_chars must not exceed max_bytes")
+        self.target_bytes, self.max_bytes, self.min_chars = target_bytes, max_bytes, min_chars
+        self.max_source_bytes = max_source_bytes
+        fallback_size = max(target_bytes, min_chars)
+        self.fallback = fallback or TextChunker(fallback_size, min_chars, markdown=False)
+
+    def supports(self, language: str) -> bool:
+        """Whether the pack knows `language`; its grammar may still need a download."""
+        import tree_sitter_language_pack as pack
+
+        return language in pack.manifest_languages()
+
+    def chunk(self, text: str, language: str) -> list[Chunk]:
+        import tree_sitter_language_pack as pack
+
+        data = text.encode()
+        if not text.strip() or not self.supports(language) or len(data) > self.max_source_bytes:
+            return self.fallback.chunk(text)
+        try:
+            tree = pack.get_parser(language).parse(data)
+        except pack.Error:
+            return self.fallback.chunk(text)
+        spans = _merge_adjacent(_split_node(tree.root_node, self.target_bytes, 0),
+                                self.target_bytes)
+        spans = [(_char_start(data, a), _char_start(data, b))
+                 for a, b in _bounded(spans, self.max_bytes, data)]
+        chars = _char_offsets(data, sorted({o for span in spans for o in span}))
+        return _build(text, [(chars[a], chars[b]) for a, b in spans if b > a],
+                      self.min_chars)
+
+
+def _split_node(node, target: int, depth: int) -> list[tuple[int, int]]:
+    """Group a node's children into byte spans aiming at `target`."""
+    if (not node.children or depth > _MAX_DEPTH
+            or node.end_byte - node.start_byte < _MIN_NODE_BYTES):
+        return [(node.start_byte, node.end_byte)]
+    groups: list[tuple[int, int]] = []
+    children = node.children
+    i = 0
+    while i < len(children):
+        start, end = children[i].start_byte, children[i].end_byte
+        size = end - start
+        i += 1
+        if size > target:
+            groups.extend(_split_node(children[i - 1], target, depth + 1))
+            continue
+        while i < len(children):
+            nxt = children[i]
+            if size + (nxt.end_byte - nxt.start_byte) > target:
+                break
+            end = nxt.end_byte
+            size += nxt.end_byte - nxt.start_byte
+            i += 1
+        groups.append((start, end))
+    return groups
+
+
+def _merge_adjacent(spans: list[tuple[int, int]], target: int) -> list[tuple[int, int]]:
+    """Coalesce neighbouring spans back up towards `target`.
+
+    Splitting alone leaves many small spans, because a node's children
+    are often individually tiny; merging is what makes sizes uniform.
+    """
+    if not spans:
+        return []
+    out: list[tuple[int, int]] = []
+    start, end = spans[0]
+    for nxt_start, nxt_end in spans[1:]:
+        if (end - start) + (nxt_end - nxt_start) > target:
+            out.append((start, end))
+            start, end = nxt_start, nxt_end
+            continue
+        end = nxt_end
+    out.append((start, end))
+    return out
+
+
+def _bounded(spans: list[tuple[int, int]], limit: int, data: bytes) -> list[tuple[int, int]]:
+    """Cut any span over `limit` bytes into pieces that fit, at character boundaries."""
+    out: list[tuple[int, int]] = []
+    for start, end in spans:
+        while end - start > limit:
+            cut = _char_start(data, start + limit)
+            out.append((start, cut))
+            start = cut
+        out.append((start, end))
+    return out
+
+
+class TreeSitterPackChunker:
     """Syntax-aligned chunks from tree-sitter-language-pack's chunker.
 
-    Needs the `tree-sitter` extra. The language pack downloads a
+    The pack cuts chunks of at most `target_chars`; adjacent small ones
+    are then merged back up towards it. A merged chunk keeps the first
+    piece's context and the symbols of all of them. A pack piece over the
+    target means incomplete output and falls back. Needs the `tree-sitter`
+    extra. The language pack downloads a
     grammar the first time a language is parsed. A language it does not
     know, a grammar it cannot download, or a failure to parse falls back
     to `fallback`: a TextChunker of the same bounds that does not read
@@ -109,23 +245,24 @@ class TreeSitterChunker:
     file cannot stall indexing.
     """
 
-    def __init__(self, max_chars: int = 750, min_chars: int = 1,
+    def __init__(self, target_chars: int = 750, min_chars: int = 1,
                  fallback: TextChunker | None = None, *,
                  max_source_bytes: int = 5_000_000, parse_timeout_ms: int = 5_000) -> None:
         try:
             import tree_sitter_language_pack  # noqa: F401
         except ImportError as exc:
-            raise ImportError("TreeSitterChunker needs the tree-sitter extra:"
+            raise ImportError("TreeSitterPackChunker needs the tree-sitter extra:"
                               " pip install 'semsift[tree-sitter]'") from exc
-        _check(max_chars, min_chars)
+        _check(target_chars, min_chars, "target_chars")
         if (isinstance(max_source_bytes, bool)
                 or not isinstance(max_source_bytes, int) or max_source_bytes <= 0
                 or isinstance(parse_timeout_ms, bool)
                 or not isinstance(parse_timeout_ms, int) or parse_timeout_ms <= 0):
             raise ValueError("max_source_bytes and parse_timeout_ms must be positive integers")
-        self.max_chars, self.min_chars = max_chars, min_chars
+        self.target_chars, self.min_chars = target_chars, min_chars
         self.max_source_bytes, self.parse_timeout_ms = max_source_bytes, parse_timeout_ms
-        self.fallback = fallback or TextChunker(max_chars, min_chars, markdown=False)
+        self.fallback = fallback or TextChunker(target_chars, min(min_chars, target_chars),
+                                                markdown=False)
 
     def supports(self, language: str) -> bool:
         """Whether the pack knows `language`; its grammar may still need a download."""
@@ -143,7 +280,7 @@ class TreeSitterChunker:
         try:
             result = pack.process(text, pack.ProcessConfig(
                 language=language, structure=False, imports=False, exports=False,
-                chunk_max_size=self.max_chars, max_source_bytes=self.max_source_bytes,
+                chunk_max_size=self.target_chars, max_source_bytes=self.max_source_bytes,
                 parse_timeout_ms=self.parse_timeout_ms))
         except pack.Error:
             return self.fallback.chunk(text)
@@ -164,9 +301,30 @@ class TreeSitterChunker:
                 extras.setdefault(key, (tuple(meta.context_path), tuple(meta.symbols_defined)))
         bounds = [chars[b] for b in starts] + [len(text)]
         spans = [(a, b) for a, b in zip(bounds, bounds[1:]) if b > a]
-        if any(end - start > self.max_chars for start, end in spans):
+        # The pack was asked for pieces of at most target_chars; a larger
+        # one means its output is incomplete.
+        if any(end - start > self.target_chars for start, end in spans):
             return self.fallback.chunk(text)
+        spans, extras = _merge_up(spans, extras, self.target_chars)
         return _build(text, spans, self.min_chars, extras)
+
+
+def _merge_up(spans, extras, target: int):
+    """Join adjacent spans while the joined span stays within `target`."""
+    merged: list[tuple[int, int]] = []
+    meta: dict[int, tuple[tuple[str, ...], tuple[str, ...]]] = {}
+    for start, end in spans:
+        context, symbols = extras.get(start, ((), ()))
+        if merged and end - merged[-1][0] <= target:
+            first = merged[-1][0]
+            merged[-1] = (first, end)
+            old_context, old_symbols = meta[first]
+            meta[first] = (old_context, old_symbols + tuple(
+                s for s in symbols if s not in old_symbols))
+            continue
+        merged.append((start, end))
+        meta[start] = (context, symbols)
+    return merged, meta
 
 
 def _char_start(data: bytes, offset: int) -> int:

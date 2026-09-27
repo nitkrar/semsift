@@ -9,6 +9,7 @@
 | `search` | Implemented |
 | `evals` | Implemented |
 | `chunk` | Implemented |
+| `files` | Implemented |
 
 ## What it is
 
@@ -27,7 +28,7 @@ Two consumers shape it:
 Both run the same flow:
 
 ```
-write:  content → chunk → embed (outside the transaction) → store
+write:  files → chunk → embed (outside the transaction) → store
 query:  query → store vector search  ┐
                 store keyword search ┼→ fuse → hydrate top N → rerank → hits
                 consumer sources ────┘
@@ -57,7 +58,8 @@ query:  query → store vector search  ┐
 | `rerank` | `Reranker` | recency, MMR, metadata rules | domain rerankers (code boosts, file coherence) |
 | `search` | composer and `Source` | one composer | extra sources, including candidate expansion |
 | `evals` | harness | metrics, run files, fusion tuning, golden vectors, a small labelled corpus | their own labelled data |
-| `chunk` | `chunk(text)` → `Chunk`s | `TextChunker`, `TreeSitterChunker` | content-specific chunking |
+| `chunk` | `chunk(text)` → `Chunk`s | `TextChunker`, `LanguagePackChunker`, `TreeSitterPackChunker` | content-specific chunking |
+| `files` | `discover(root)` → files | ignore files, one include filter | which files to include |
 
 `embed` imports nothing else from semsift, so it can become its own
 package if something needs embeddings without retrieval.
@@ -120,9 +122,14 @@ knowledge store puts title, people and notes there.
 | `embed(items)` | encodes items with the store's encoder; touches no table |
 | `upsert(items)` | writes items with their vectors; replaces rows with the same id |
 | `remove(ids)` | deletes items, vectors and keyword rows |
+| `missing_vectors()` | ids of items stored without a vector |
+| `add_vectors(ids, vectors)` | attaches vectors to items already stored |
 
 Encoding is slow, so it happens in `embed`, before the consumer opens its
-write transaction. `upsert` accepts only vectors produced by an encoder
+write transaction. A store without an encoder writes items with no
+vectors; they are searchable by keyword at once, and a store with an
+encoder can embed `missing_vectors()` later and `add_vectors` in one
+batch. `upsert` accepts only vectors produced by an encoder
 whose space matches the stored one, or precomputed `Vectors(space, rows)`
 checked the same way. The store never commits: `upsert` and `remove`
 require the caller to be inside a transaction, so an item, its vector,
@@ -285,22 +292,45 @@ A result carries:
 A `Chunk` is `text`, its character span (`start`, `end`), 1-based
 `start_line` and `end_line`, and, when the chunker knows them, `context`
 (enclosing definitions) and `symbols` (names defined inside). The span is
-what a hit cites. Both chunkers bound each chunk by `max_chars` and drop
-chunks whose stripped text is shorter than `min_chars`; with `min_chars`
-at 0, the spans tile the text in order.
+what a hit cites. Every chunker drops chunks whose stripped text is
+shorter than `min_chars`.
 
-- `TextChunker` groups lines. With `markdown` on (the default), an ATX
-  heading outside a fenced block always starts a chunk; after a blank
-  line, a chunk at least half full ends before the next paragraph; a line
-  longer than the bound is cut.
-- `TreeSitterChunker` delegates to tree-sitter-language-pack's chunker,
-  which splits along the syntax tree and reports each chunk's context and
-  symbols. It needs the `tree-sitter` extra. A language the pack does not
-  list, a grammar it cannot download, a source over `max_source_bytes`
-  (5 MB), a parse past `parse_timeout_ms` (5 s) or a parse that fails
-  falls back to a `TextChunker` with `markdown` off, since `#` often
-  begins a comment in code. `supports()` says whether the pack lists a
-  language; the grammar may still need downloading on first use.
+`TextChunker` groups lines up to `max_chars`. With `markdown` on (the
+default), an ATX heading outside a fenced block always starts a chunk;
+after a blank line, a chunk at least half full ends before the next
+paragraph; a line longer than the bound is cut. With `min_chars` at 0 its
+spans tile the text in order.
+
+Both tree-sitter chunkers need the `tree-sitter` extra, parse with the
+same grammars, and fall back to a `TextChunker` with `markdown` off for a
+language the pack does not list, a grammar it cannot download, a failed
+parse, or a source over `max_source_bytes` (5 MB). `supports()` says
+whether the pack lists a language; its grammar may still need
+downloading on first use. They differ in who decides the boundaries:
+
+| | `LanguagePackChunker` | `TreeSitterPackChunker` |
+|---|---|---|
+| Boundaries | our walker over the parse tree | the pack's own chunker (`process()`) |
+| Sizes | `target_bytes` (750, an aim), `max_bytes` (20,000, a ceiling) | `target_chars` (750, a hard cap) |
+| Small pieces | merged back up towards the target | merged back up towards the target |
+| Coverage | syntax nodes; whitespace between groups is in no chunk | tiles the text |
+| Metadata | none | enclosing context and symbols, always computed |
+| Parse timeout | none: the parser has no cancellation hook | `parse_timeout_ms` (5 s) |
+| Cost | about the cost of parsing | about 5× that per file, fixed |
+
+`LanguagePackChunker` reproduces repoglass's window chunks exactly.
+
+### files
+
+`discover(root, ignore_files=(".gitignore",), include=None)` yields the
+files under `root` as relative paths with size and modification time.
+`ignore_files` are read in every directory in gitignore syntax and apply
+below it; a later file in the list settles disagreements, and a nearer
+`!` pattern re-admits what an outer one excluded. `include(path,
+is_dir)` decides everything else: returning False prunes a directory or
+skips a file. `.git` is never walked; symlinked directories are not
+followed; a file reached by two paths is yielded once; only regular
+files are yielded.
 
 ### evals
 
@@ -328,8 +358,8 @@ outside any repository.
 
 - Published to PyPI only. semsift has no command of its own, so it has no
   Homebrew formula; a consumer's formula lists it as a resource.
-- Core dependencies: numpy, vicinity, and model2vec with huggingface-hub
-  and tokenizers, so a plain install can embed. `sqlite3` is in the
+- Core dependencies: numpy, vicinity, pathspec, and model2vec with
+  huggingface-hub and tokenizers, so a plain install can embed. `sqlite3` is in the
   standard library; FTS5 must be compiled in.
 - Extras: `onnx` (onnxruntime), `webgpu` (onnxruntime and its webgpu
   plugin), `tree-sitter` (tree-sitter-language-pack). Each class that
@@ -339,7 +369,7 @@ outside any repository.
 ## Migration from repoglass
 
 `repoglass.semantic_core` moved here as `embed` and `fuse`. repoglass
-adopts `embed`, `fuse`, `store` and `chunk` first; `TreeSitterChunker`
+adopts `embed`, `fuse`, `store` and `chunk` first; `LanguagePackChunker`
 replaces its window chunker, and it keeps its definition chunks and
 symbol table. It keeps its own orchestration too:
 its definition boost adds candidates retrieval never returned, and its

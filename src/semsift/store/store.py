@@ -363,6 +363,39 @@ class Store:
         return self.conn.execute(
             f"SELECT 1 FROM {self._t['vectors']} LIMIT 1").fetchone() is not None
 
+    def missing_vectors(self) -> list[int]:
+        """Ids of stored items that have no vector, in id order."""
+        t = self._t
+        return [r[0] for r in self.conn.execute(
+            f"SELECT i.id FROM {t['items']} i LEFT JOIN {t['vectors']} v ON v.id = i.id"
+            " WHERE v.id IS NULL ORDER BY i.id")]
+
+    def add_vectors(self, ids: Sequence[int], vectors: Vectors) -> None:
+        """Attach vectors to items already stored, in the caller's transaction.
+
+        Lets a consumer write items, searchable by keyword at once, and
+        embed them later in one batch.
+        """
+        self._require_transaction()
+        self._check_space()
+        ids = list(ids)
+        blobs = self._blobs(ids, vectors)
+        if not ids:
+            return
+        known = set()
+        for start in range(0, len(ids), _BATCH):
+            chunk = ids[start:start + _BATCH]
+            known.update(r[0] for r in self.conn.execute(
+                f"SELECT id FROM {self._t['items']} WHERE id IN"
+                f" ({', '.join('?' * len(chunk))})", chunk))
+        unknown = [i for i in ids if i not in known]
+        if unknown:
+            raise ValueError(f"no stored item for ids {unknown[:5]}")
+        self.conn.executemany(
+            f"INSERT INTO {self._t['vectors']} (id, vec) VALUES (?, ?)"
+            " ON CONFLICT(id) DO UPDATE SET vec = excluded.vec", list(zip(ids, blobs)))
+        self._bump(vectors.space, canary=vectors.canary)
+
     def remove(self, ids: Iterable[int]) -> None:
         """Delete items, their vectors and their keyword rows."""
         self._require_transaction()

@@ -111,7 +111,7 @@ jobs:
 
       - name: tests
         run: |
-          python -m unittest -v tests.chunk.test_chunkers 2>&1 | tee out.txt
+          python -m unittest -v tests.chunk.test_chunkers tests.chunk.test_walker 2>&1 | tee out.txt
           if grep -q skipped out.txt; then
             echo "::error::tree-sitter tests skipped; this job exists to run them"
             exit 1
