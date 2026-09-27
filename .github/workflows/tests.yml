@@ -29,7 +29,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: install
-        run: python -m pip install --quiet '.[static,tree-sitter]'
+        run: python -m pip install --quiet '.[tree-sitter]'
 
       - name: tests
         run: python -m unittest discover -s tests -t .
@@ -54,7 +54,7 @@ jobs:
           key: hf-${{ hashFiles('tests/golden/models.py') }}
 
       - name: install
-        run: python -m pip install --quiet '.[static,onnx]'
+        run: python -m pip install --quiet '.[onnx]'
 
       # Through the same constructors the tests use, so the set of files
       # each model needs is decided in one place.

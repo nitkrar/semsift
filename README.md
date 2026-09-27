@@ -34,13 +34,14 @@ for hit in search.run("when is rent due", k=1).hits:
     print(hit.citation["source"], hit.text)
 ```
 
-Install extras for what you use: `static` (model2vec encoders), `onnx`,
-`webgpu`, `tree-sitter` (syntax-aware chunking).
+`pip install semsift` includes the static (model2vec) encoders. Extras
+add the rest: `onnx`, `webgpu`, and `tree-sitter` for syntax-aware
+chunking.
 
 ## Development
 
 ```
-uv venv .venv && uv pip install --python .venv/bin/python -e ".[static,onnx,tree-sitter]"
+uv venv .venv && uv pip install --python .venv/bin/python -e ".[onnx,tree-sitter]"
 HF_HUB_OFFLINE=1 .venv/bin/python -m unittest discover -s tests -t .
 .venv/bin/python benchmarks/run.py
 ```
@@ -52,7 +53,7 @@ or build it (`uv build`) and install the wheel from `dist/`.
 ## Releasing
 
 The version lives only in `semsift.__version__`. Bump it, commit, and push
-a matching tag (`v0.0.1`). The release workflow runs the tests, builds,
+a matching tag (`v0.0.2`). The release workflow runs the tests, builds,
 refuses to publish unless the tag, `__version__`, the sdist and the wheel
 agree, publishes to PyPI through trusted publishing, and creates the
 GitHub release. PyPI must list this repository's `release.yml` as a

@@ -112,6 +112,11 @@ class TreeSitterChunker:
     def __init__(self, max_chars: int = 750, min_chars: int = 1,
                  fallback: TextChunker | None = None, *,
                  max_source_bytes: int = 5_000_000, parse_timeout_ms: int = 5_000) -> None:
+        try:
+            import tree_sitter_language_pack  # noqa: F401
+        except ImportError as exc:
+            raise ImportError("TreeSitterChunker needs the tree-sitter extra:"
+                              " pip install 'semsift[tree-sitter]'") from exc
         _check(max_chars, min_chars)
         if (isinstance(max_source_bytes, bool)
                 or not isinstance(max_source_bytes, int) or max_source_bytes <= 0

@@ -328,11 +328,12 @@ outside any repository.
 
 - Published to PyPI only. semsift has no command of its own, so it has no
   Homebrew formula; a consumer's formula lists it as a resource.
-- Core dependencies: numpy, vicinity. `sqlite3` is in the standard
-  library; FTS5 must be compiled in.
-- Extras: `tree-sitter` (tree-sitter-language-pack), `static`
-  (model2vec, huggingface-hub), `onnx` (onnxruntime, huggingface-hub,
-  tokenizers), `webgpu` (everything in `onnx` plus onnxruntime-ep-webgpu).
+- Core dependencies: numpy, vicinity, and model2vec with huggingface-hub
+  and tokenizers, so a plain install can embed. `sqlite3` is in the
+  standard library; FTS5 must be compiled in.
+- Extras: `onnx` (onnxruntime), `webgpu` (onnxruntime and its webgpu
+  plugin), `tree-sitter` (tree-sitter-language-pack). Each class that
+  needs one names it in the ImportError it raises when it is missing.
 - Python 3.11 or newer.
 
 ## Migration from repoglass

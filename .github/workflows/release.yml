@@ -22,7 +22,7 @@ jobs:
           python-version: "3.14"
 
       - name: install
-        run: python -m pip install --quiet '.[static,tree-sitter]'
+        run: python -m pip install --quiet '.[tree-sitter]'
 
       - name: tests
         env:

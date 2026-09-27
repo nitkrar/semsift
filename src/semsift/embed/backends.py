@@ -253,8 +253,8 @@ class OnnxEncoder(_PrefixMixin):
         try:
             import onnxruntime as ort
         except ImportError as exc:      # pragma: no cover - environment
-            raise ValueError(
-                "OnnxEncoder requires onnxruntime: pip install onnxruntime"
+            raise ImportError(
+                "OnnxEncoder needs the onnx extra: pip install 'semsift[onnx]'"
             ) from exc
         from huggingface_hub import hf_hub_download
         from tokenizers import Tokenizer
@@ -378,9 +378,9 @@ def _webgpu(ort) -> str:
         try:
             import onnxruntime_ep_webgpu as plugin
         except ImportError as exc:
-            raise ValueError(
-                "providers='webgpu' requires the plugin: pip install"
-                " onnxruntime-ep-webgpu, or use providers='cpu'"
+            raise ImportError(
+                "providers='webgpu' needs the webgpu extra: pip install"
+                " 'semsift[webgpu]', or use providers='cpu'"
             ) from exc
         name = plugin.get_ep_name()
         ort.register_execution_provider_library(name, plugin.get_library_path())
