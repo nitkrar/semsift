@@ -540,7 +540,9 @@ class CacheTests(unittest.TestCase):
 
     def test_cache_evicts_least_recently_used_entries_to_both_limits(self) -> None:
         def index(nbytes):
-            return vindex.VectorIndex((), object(), nbytes)
+            from types import SimpleNamespace
+
+            return SimpleNamespace(nbytes=nbytes)
 
         by_entries = vindex.Cache(max_entries=1, max_bytes=100)
         by_entries.put("a", 1, index(4))
@@ -593,6 +595,27 @@ class FetchTests(Fixture):
         self.assertEqual(len(items), len(got))
         self.assertEqual("item 1001", got[1001].text)
 
+
+
+class BackendTests(unittest.TestCase):
+    def test_a_store_searches_through_the_backend_it_is_given(self) -> None:
+        from semsift.store.index import Exhaustive
+
+        built = []
+
+        def recording(ids, matrix):
+            built.append(list(ids))
+            return Exhaustive(ids, matrix)
+
+        conn = memory()
+        store = Store(conn, "b", [], encoder=FakeEncoder(dims=8), backend=recording)
+        items = [Item(1, "alpha"), Item(2, "beta")]
+        vectors = store.embed(items)
+        conn.execute("BEGIN")
+        store.upsert(items, vectors)
+        conn.execute("COMMIT")
+        self.assertEqual({1, 2}, {s.id for s in store.search_vector("alpha", 5).items})
+        self.assertEqual([[1, 2]], built)
 
 if __name__ == "__main__":
     unittest.main()

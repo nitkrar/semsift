@@ -53,7 +53,7 @@ or build it (`uv build`) and install the wheel from `dist/`.
 ## Releasing
 
 The version lives only in `semsift.__version__`. Bump it, commit, and push
-a matching tag (`v0.0.3`). The release workflow runs the tests, builds,
+a matching tag (`v0.0.4`). The release workflow runs the tests, builds,
 refuses to publish unless the tag, `__version__`, the sdist and the wheel
 agree, publishes to PyPI through trusted publishing, and creates the
 GitHub release. PyPI must list this repository's `release.yml` as a

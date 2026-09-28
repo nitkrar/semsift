@@ -178,17 +178,24 @@ encoder).
 | `search_keyword(query, k, filter)` | FTS5 BM25, negated so higher is better; `raw` keeps the original |
 | `fetch(ids, fields)` | text, metadata and vectors for hydration |
 
-**Vector search** delegates the nearest-neighbour math to MinishLab
-vicinity's basic backend. The adapter around it owns:
+**Vector search** loads the matching vectors and hands them to a
+backend, which the store is given as `backend=` (a factory from ids and
+an `(n, dims)` matrix). A backend's `query(vector, k)` returns the best
+`k` as `(id, cosine)` ordered by `(-score, id)`, so equal scores resolve
+by id whatever order rows were loaded in, and refuses a query of another
+width.
 
-- loading the matching vectors, widening them to float32 and building the
-  index;
-- converting vicinity's cosine distance to a higher-is-better score;
-- deterministic ties: vicinity picks among equal scores arbitrarily, so
-  the adapter fetches past `k` and keeps widening while the score at the
-  cut equals the score after it, up to all rows, then orders by
-  `(-score, id)` and cuts to `k`;
-- refusing a query vector whose width differs from the stored one.
+| Backend | Search | Needs | Tuning |
+|---|---|---|---|
+| `Exhaustive` (default) | exact: one matrix-vector product over unit-length float32 rows | numpy | — |
+| `HNSW` | approximate: an hnswlib graph over inner product | the `hnsw` extra | `m`, `ef_construction`, `ef_search` |
+| `USearch` | approximate: a usearch HNSW index over inner product | the `usearch` extra | `connectivity`, `expansion_add`, `expansion_search` |
+
+A backend is built per filter and store generation and cached like any
+other, so an approximate one pays off where a filter still leaves many
+vectors. Approximate backends resolve ties by id among the results they
+return; only `Exhaustive` guarantees the same set a full sort would. To
+tune one, pass a factory: `backend=functools.partial(HNSW, ef_search=128)`.
 
 **The vector cache** holds built indexes, keyed by filter, bounded by
 entry count and bytes and evicted least recently used. A filter with a
@@ -359,11 +366,12 @@ outside any repository.
 
 - Published to PyPI only. semsift has no command of its own, so it has no
   Homebrew formula; a consumer's formula lists it as a resource.
-- Core dependencies: numpy, vicinity, pathspec, and model2vec with
+- Core dependencies: numpy, pathspec, and model2vec with
   huggingface-hub and tokenizers, so a plain install can embed. `sqlite3` is in the
   standard library; FTS5 must be compiled in.
 - Extras: `onnx` (onnxruntime), `webgpu` (onnxruntime and its webgpu
-  plugin), `tree-sitter` (tree-sitter-language-pack). Each class that
+  plugin), `tree-sitter` (tree-sitter-language-pack), `hnsw` (hnswlib),
+  `usearch` (usearch). Each class that
   needs one names it in the ImportError it raises when it is missing.
 - Python 3.11 or newer.
 
@@ -394,8 +402,11 @@ reranker. It moves onto the composer when those become `Source`s.
 
 ## Rejected alternatives
 
-**Our own nearest-neighbour math.** vicinity provides it, with
-approximate backends for when a corpus outgrows exhaustive scoring.
+**MinishLab vicinity for nearest-neighbour math.** It imports orjson at
+package import for its save and load, which semsift never calls. orjson's
+macOS wheels have no header room for Homebrew's install-name rewrite, so
+a Homebrew formula carrying it fails to install. Exhaustive scoring is a
+few lines of numpy.
 
 **A SQLite backend inside vicinity.** A vicinity backend holds vectors in
 memory; SQLite would only be where they load from.

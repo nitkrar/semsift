@@ -50,7 +50,7 @@ they shape the design. The rest:
 
 | Item | From | Reason |
 |---|---|---|
-| Faiss, torch, transformers | retriv | Heavy for exhaustive-scale corpora; vicinity covers approximate search if needed |
+| Faiss, torch, transformers | retriv | Heavy for exhaustive-scale corpora; an approximate backend can be added behind the store's `backend=` seam |
 | Full-rebuild-only indexing | retriv | Unusable for refresh and for an append-heavy memory store |
 | Intent routing, suffix query expansion | retrivo | Resembles repoglass's measured and rejected `tier_routing`; FTS5 stemming covers expansion |
 | TF-IDF refit per call as an embedder | semshift | Vectors depend on the batch, which breaks `VectorSpace` |

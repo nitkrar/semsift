@@ -127,6 +127,7 @@ class Store:
     def __init__(self, conn: sqlite3.Connection, prefix: str,
                  fields: Sequence[Field], *, encoder=None,
                  tokenizer: str = "unicode61", cache: vindex.Cache | None = None,
+                 backend: vindex.BackendFactory = vindex.Exhaustive,
                  drift_warn: float = 0.9999, drift_stale: float = 0.99) -> None:
         if not isinstance(prefix, str) or not _IDENT.match(prefix):
             raise ValueError(f"prefix {prefix!r} must match [a-z][a-z0-9_]*")
@@ -156,6 +157,7 @@ class Store:
         self.encoder = encoder
         self.tokenizer = tokenizer
         self._cache = cache or vindex.Cache()
+        self._backend = backend
         self._cache_namespace = object()
         self._t = {name: f'"{prefix}_{name}"' for name in ("meta", "items", "vectors", "fts")}
         self._declaration = json.dumps(
@@ -580,7 +582,7 @@ class Store:
         else:
             self._bump(reset_space=True)
 
-    def _index(self, where) -> vindex.VectorIndex:
+    def _index(self, where) -> vindex.Backend:
         # Inside a transaction the rows may yet roll back, so nothing built
         # there is kept.
         cacheable = where.cacheable and not self.conn.in_transaction
@@ -594,7 +596,7 @@ class Store:
         rows = self.conn.execute(
             f"SELECT v.id, v.vec FROM {t['vectors']} v JOIN {t['items']} i ON i.id = v.id"
             f" WHERE {where.sql} ORDER BY v.id", where.params).fetchall()
-        idx = vindex.build([r[0] for r in rows], unpack([r[1] for r in rows]))
+        idx = vindex.build([r[0] for r in rows], unpack([r[1] for r in rows]), self._backend)
         if cacheable:
             self._cache.put(key, generation, idx)
         return idx
