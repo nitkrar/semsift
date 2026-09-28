@@ -19,13 +19,15 @@ from .filters import Filter, compile_filter
 
 _IDENT = re.compile(r"[a-z][a-z0-9_]*\Z")
 _KINDS = {"int": "INTEGER", "float": "REAL", "text": "TEXT", "bool": "INTEGER"}
-_RESERVED = {"id", "text", "keyword_text", "extra"}
+_RESERVED = {"id", "text", "keywords", "keyword_override", "extra"}
 _TOKENIZERS = {"unicode61": "unicode61", "porter": "porter unicode61",
                "trigram": "trigram"}
 #: SQLite's default host-parameter limit is 999 on older builds.
 _BATCH = 500
 _MIN_ID = -(1 << 63)
 _MAX_ID = (1 << 63) - 1
+#: The table layout. A store written under another layout is refused on open.
+LAYOUT = 2
 
 
 @dataclass(frozen=True)
@@ -39,12 +41,17 @@ class Field:
 
 @dataclass(frozen=True)
 class Item:
-    """What a consumer stores. `keyword_text` defaults to `text`."""
+    """What a consumer stores.
+
+    The keyword index reads `keywords` followed by `text`, or
+    `keyword_text` instead of both when it is set. Only `text` is embedded.
+    """
 
     id: int
     text: str
     metadata: Mapping[str, Any] = field(default_factory=dict)
     keyword_text: str | None = None
+    keywords: str | None = None
 
 
 @dataclass(frozen=True)
@@ -67,6 +74,10 @@ CANARY_TEXTS = ("The landlord renewed the lease; rent is due on the first.",
 
 class StaleVectors(RuntimeError):
     """The encoder's outputs moved too far from the stored vectors to rank by."""
+
+
+class StaleKeywords(RuntimeError):
+    """Keyword writes were deferred and `sync_keywords` has not run since."""
 
 
 @dataclass(frozen=True)
@@ -101,6 +112,12 @@ class Record:
     text: str | None = None
     metadata: dict | None = None
     vector: tuple[float, ...] | None = None
+
+
+def _keyword_text(row: str) -> str:
+    """The SQL for what the keyword index reads from an items row."""
+    return (f"coalesce({row}.keyword_override, CASE WHEN {row}.keywords IS NULL"
+            f" THEN {row}.text ELSE {row}.keywords || char(10) || {row}.text END)")
 
 
 def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
@@ -159,9 +176,11 @@ class Store:
         self._cache = cache or vindex.Cache()
         self._backend = backend
         self._cache_namespace = object()
-        self._t = {name: f'"{prefix}_{name}"' for name in ("meta", "items", "vectors", "fts")}
+        self._t = {name: f'"{prefix}_{name}"'
+                   for name in ("meta", "items", "vectors", "fts", "keyword")}
         self._declaration = json.dumps(
-            {"fields": [asdict(f) for f in fields], "tokenizer": tokenizer})
+            {"layout": LAYOUT, "fields": [asdict(f) for f in fields],
+             "tokenizer": tokenizer})
         if self._table_exists():
             stored = conn.execute(f"SELECT declaration FROM {self._t['meta']}").fetchone()[0]
             if stored != self._declaration:
@@ -181,16 +200,32 @@ class Store:
         # transaction the caller has open.
         t = self._t
         cols = "".join(f', "{f.name}" {_KINDS[f.kind]}' for f in self.fields)
+        # While keyword writes are deferred, the next rebuild covers them.
+        live = f"WHEN (SELECT keywords_stale FROM {t['meta']}) = 0"
         statements = [
             f"CREATE TABLE {t['meta']} (id INTEGER PRIMARY KEY CHECK (id = 1),"
             " declaration TEXT NOT NULL, space TEXT, canary TEXT, embedded_at REAL,"
-            " generation INTEGER NOT NULL DEFAULT 0)",
+            " generation INTEGER NOT NULL DEFAULT 0,"
+            " keywords_stale INTEGER NOT NULL DEFAULT 0)",
             f"INSERT INTO {t['meta']} (id, declaration) VALUES (1, ?)",
             f"CREATE TABLE {t['items']} (id INTEGER PRIMARY KEY, text TEXT NOT NULL,"
-            f" keyword_text TEXT NOT NULL{cols}, extra TEXT NOT NULL DEFAULT '{{}}')",
+            f" keywords TEXT, keyword_override TEXT{cols},"
+            " extra TEXT NOT NULL DEFAULT '{}')",
             f"CREATE TABLE {t['vectors']} (id INTEGER PRIMARY KEY, vec BLOB NOT NULL)",
+            # The keyword text is derived, never stored: FTS5 reads it
+            # through this view, and the triggers keep the index in step
+            # with every write to items, including a rollback's.
+            f"CREATE VIEW {t['keyword']} AS SELECT id, {_keyword_text('items')}"
+            f" AS keyword_text FROM {t['items']} items",
             f"CREATE VIRTUAL TABLE {t['fts']} USING fts5(keyword_text,"
-            f" tokenize='{tokenize}')",
+            f" content='{self.prefix}_keyword', content_rowid='id', tokenize='{tokenize}')",
+            f'CREATE TRIGGER "{self.prefix}_items_insert" AFTER INSERT ON {t["items"]}'
+            f" {live} BEGIN {self._fts_add('new')} END",
+            f'CREATE TRIGGER "{self.prefix}_items_delete" AFTER DELETE ON {t["items"]}'
+            f" {live} BEGIN {self._fts_drop('old')} END",
+            f'CREATE TRIGGER "{self.prefix}_items_update" AFTER UPDATE OF'
+            f" text, keywords, keyword_override ON {t['items']}"
+            f" {live} BEGIN {self._fts_drop('old')} {self._fts_add('new')} END",
         ]
         statements += [
             f'CREATE INDEX "{self.prefix}_items_{f.name}" ON {t["items"]} ("{f.name}")'
@@ -206,6 +241,15 @@ class Store:
             self.conn.execute(f"RELEASE {savepoint}")
             raise
         self.conn.execute(f"RELEASE {savepoint}")
+
+    def _fts_add(self, row: str) -> str:
+        return (f"INSERT INTO {self._t['fts']} (rowid, keyword_text)"
+                f" VALUES ({row}.id, {_keyword_text(row)});")
+
+    def _fts_drop(self, row: str) -> str:
+        # External content: the index is told the exact text it indexed.
+        return (f"INSERT INTO {self._t['fts']} ({self._t['fts']}, rowid, keyword_text)"
+                f" VALUES ('delete', {row}.id, {_keyword_text(row)});")
 
     # -- state ------------------------------------------------------------
 
@@ -290,23 +334,21 @@ class Store:
         cols = "".join(f', "{n}"' for n in names)
         marks = ", ?" * len(names)
         updates = "".join(f', "{n}" = excluded."{n}"' for n in names)
-        for i, (item, (declared, extra, keyword)) in enumerate(zip(items, prepared)):
-            self.conn.execute(
-                f"INSERT INTO {t['items']} (id, text, keyword_text{cols}, extra)"
-                f" VALUES (?, ?, ?{marks}, ?) ON CONFLICT(id) DO UPDATE SET"
-                f" text = excluded.text, keyword_text = excluded.keyword_text{updates},"
-                " extra = excluded.extra",
-                (item.id, item.text, keyword, *declared, extra))
-            self.conn.execute(f"DELETE FROM {t['fts']} WHERE rowid = ?", (item.id,))
-            self.conn.execute(f"INSERT INTO {t['fts']} (rowid, keyword_text) VALUES (?, ?)",
-                              (item.id, keyword))
-            if blobs is not None:
-                self.conn.execute(
-                    f"INSERT INTO {t['vectors']} (id, vec) VALUES (?, ?)"
-                    " ON CONFLICT(id) DO UPDATE SET vec = excluded.vec",
-                    (item.id, blobs[i]))
-            else:
-                self.conn.execute(f"DELETE FROM {t['vectors']} WHERE id = ?", (item.id,))
+        self.conn.executemany(
+            f"INSERT INTO {t['items']} (id, text, keywords, keyword_override{cols}, extra)"
+            f" VALUES (?, ?, ?, ?{marks}, ?) ON CONFLICT(id) DO UPDATE SET"
+            " text = excluded.text, keywords = excluded.keywords,"
+            f" keyword_override = excluded.keyword_override{updates}, extra = excluded.extra",
+            [(item.id, item.text, item.keywords, item.keyword_text, *declared, extra)
+             for item, (declared, extra) in zip(items, prepared)])
+        if blobs is not None:
+            self.conn.executemany(
+                f"INSERT INTO {t['vectors']} (id, vec) VALUES (?, ?)"
+                " ON CONFLICT(id) DO UPDATE SET vec = excluded.vec",
+                [(item.id, blob) for item, blob in zip(items, blobs)])
+        else:
+            self.conn.executemany(f"DELETE FROM {t['vectors']} WHERE id = ?",
+                                  [(item.id,) for item in items])
         reset_space = blobs is None and not self._has_vectors()
         self._bump(vectors.space if vectors is not None else None,
                    reset_space=reset_space,
@@ -337,7 +379,7 @@ class Store:
                                  f" width {space.dims}")
         return [pack(row) for row in rows]
 
-    def _prepare(self, item: Item) -> tuple[list, str, str]:
+    def _prepare(self, item: Item) -> tuple[list, str]:
         from .filters import _value
 
         if type(item.id) is not int:
@@ -346,8 +388,10 @@ class Store:
             raise ValueError(f"item id {item.id} is outside SQLite's integer range")
         if type(item.text) is not str:
             raise TypeError(f"item text must be str; got {item.text!r}")
-        if item.keyword_text is not None and type(item.keyword_text) is not str:
-            raise TypeError(f"item keyword_text must be str or None; got {item.keyword_text!r}")
+        for name in ("keyword_text", "keywords"):
+            value = getattr(item, name)
+            if value is not None and type(value) is not str:
+                raise TypeError(f"item {name} must be str or None; got {value!r}")
         if not isinstance(item.metadata, Mapping):
             raise TypeError(f"item metadata must be a mapping; got {item.metadata!r}")
         if any(type(name) is not str for name in item.metadata):
@@ -357,9 +401,7 @@ class Store:
             value = item.metadata.get(f.name)
             declared.append(None if value is None else _value(f.kind, f.name, value))
         extra = {k: v for k, v in item.metadata.items() if k not in self.kinds}
-        encoded = json.dumps(extra, sort_keys=True, allow_nan=False)
-        keyword = item.text if item.keyword_text is None else item.keyword_text
-        return declared, encoded, keyword
+        return declared, json.dumps(extra, sort_keys=True, allow_nan=False)
 
     def _has_vectors(self) -> bool:
         return self.conn.execute(
@@ -413,24 +455,52 @@ class Store:
         for start in range(0, len(ids), _BATCH):
             chunk = ids[start:start + _BATCH]
             marks = ", ".join("?" * len(chunk))
-            for table, key in (("items", "id"), ("vectors", "id"), ("fts", "rowid")):
+            for table in ("items", "vectors"):
                 self.conn.execute(
-                    f"DELETE FROM {self._t[table]} WHERE {key} IN ({marks})", chunk)
+                    f"DELETE FROM {self._t[table]} WHERE id IN ({marks})", chunk)
         self._bump(reset_space=not self._has_vectors())
 
     def clear(self) -> None:
         """Delete everything and forget the vector space, to re-embed."""
         self._require_transaction()
         self._check_space()
-        for table in ("items", "vectors", "fts"):
+        for table in ("items", "vectors"):
             self.conn.execute(f"DELETE FROM {self._t[table]}")
         self._bump(reset_space=True)
+
+    @property
+    def keywords_stale(self) -> bool:
+        """Whether deferred writes are waiting for `sync_keywords`."""
+        return bool(self.conn.execute(
+            f"SELECT keywords_stale FROM {self._t['meta']}").fetchone()[0])
+
+    def defer_keywords(self) -> None:
+        """Stop maintaining the keyword index per write until `sync_keywords`.
+
+        For bulk loads: one rebuild costs less than per-write updates
+        committed in many transactions. The mark commits or rolls back
+        with the caller's transaction, so a load that dies before the
+        sync leaves the store stale, never wrong.
+        """
+        self._require_transaction()
+        self.conn.execute(f"UPDATE {self._t['meta']} SET keywords_stale = 1")
+
+    def sync_keywords(self) -> None:
+        """Rebuild the keyword index if writes were deferred."""
+        self._require_transaction()
+        if self.keywords_stale:
+            self.conn.execute(
+                f"INSERT INTO {self._t['fts']} ({self._t['fts']}) VALUES ('rebuild')")
+            self.conn.execute(f"UPDATE {self._t['meta']} SET keywords_stale = 0")
 
     # -- searches ---------------------------------------------------------
 
     def search_keyword(self, query: str, k: int, filter: Filter | None = None) -> RankedList:
         """FTS5 BM25, best first. `raw` is bm25(), where lower is better."""
         self._check_space()
+        if self.keywords_stale:
+            raise StaleKeywords(f"store {self.prefix!r}: keyword writes were deferred;"
+                                " run sync_keywords")
         where = compile_filter(filter, self.kinds)
         if k <= 0:
             return RankedList("keyword", ())

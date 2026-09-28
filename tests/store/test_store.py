@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 from semsift.embed import FakeEncoder, VectorSpace
-from semsift.store import Field, Item, Store, Vectors
+from semsift.store import Field, Item, StaleKeywords, Store, Vectors
 from semsift.store import filters as f
 from semsift.store import index as vindex
 
@@ -178,6 +178,103 @@ class WriteTests(Fixture):
         expected = self.enc.encode(["body only"])[0]
         self.assertGreater(sum(a * b for a, b in zip(stored, expected))
                            / (sum(a * a for a in expected) ** 0.5), 0.999)
+
+    def test_keywords_are_searched_alongside_text_but_not_embedded(self) -> None:
+        self.put(Item(1, "body only", keywords="pathword"))
+        self.assertEqual([1], self.kw("pathword"))
+        self.assertEqual([1], self.kw("body"))
+        stored = self.store.fetch([1], {"vector"})[1].vector
+        expected = self.enc.encode(["body only"])[0]
+        self.assertGreater(sum(a * b for a, b in zip(stored, expected))
+                           / (sum(a * a for a in expected) ** 0.5), 0.999)
+
+    def test_text_is_stored_once(self) -> None:
+        import random
+
+        rng = random.Random(0)
+        vocabulary = [f"w{i}" for i in range(200)]
+        text = " ".join(rng.choice(vocabulary) for _ in range(60_000))
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = sqlite3.connect(Path(tmp) / "s.db", isolation_level=None)
+            store = Store(conn, "s", [])
+            conn.execute("BEGIN")
+            store.upsert([Item(1, text, keywords="some path words")])
+            conn.execute("COMMIT")
+            size = (conn.execute("PRAGMA page_count").fetchone()[0]
+                    * conn.execute("PRAGMA page_size").fetchone()[0])
+            conn.close()
+        # One copy plus the inverted index; a second copy would pass 2x.
+        self.assertLess(size, 2 * len(text))
+
+    def test_the_keyword_index_matches_the_items_after_every_write(self) -> None:
+        def check() -> None:
+            self.conn.execute(
+                "INSERT INTO docs_fts(docs_fts, rank) VALUES ('integrity-check', 1)")
+
+        self.put(Item(1, "alpha", keywords="one"), Item(2, "beta"),
+                 Item(3, "gamma", keyword_text="override"))
+        check()
+        self.put(Item(1, "alpha two", keywords="uno"), Item(2, "beta", keywords="new"),
+                 Item(3, "gamma"))
+        check()
+        self.conn.execute("BEGIN")
+        self.store.upsert([Item(2, "rolled")], self.store.embed([Item(2, "rolled")]))
+        self.conn.execute("ROLLBACK")
+        check()
+        self.conn.execute("BEGIN")
+        self.store.remove([1])
+        self.conn.execute("COMMIT")
+        check()
+        self.assertEqual([], self.kw("uno"))
+        self.assertEqual([2], self.kw("new"))
+        self.assertEqual([3], self.kw("gamma"))
+        self.assertEqual([], self.kw("override"))
+        self.conn.execute("BEGIN")
+        self.store.clear()
+        self.conn.execute("COMMIT")
+        check()
+
+    def test_deferred_keywords_are_searchable_after_a_sync(self) -> None:
+        self.put(Item(1, "alpha"), Item(2, "beta"))
+        self.conn.execute("BEGIN")
+        self.store.defer_keywords()
+        self.store.upsert([Item(1, "gamma")], self.store.embed([Item(1, "gamma")]))
+        self.store.remove([2])
+        self.store.upsert([Item(3, "delta")], self.store.embed([Item(3, "delta")]))
+        self.conn.execute("COMMIT")
+        with self.assertRaises(StaleKeywords):
+            self.kw("gamma")
+        self.conn.execute("BEGIN")
+        self.store.sync_keywords()
+        self.conn.execute("COMMIT")
+        self.assertEqual([1], self.kw("gamma"))
+        self.assertEqual([], self.kw("alpha beta"))
+        self.assertEqual([3], self.kw("delta"))
+        self.conn.execute(
+            "INSERT INTO docs_fts(docs_fts, rank) VALUES ('integrity-check', 1)")
+
+    def test_a_committed_deferral_outlives_the_store_object(self) -> None:
+        self.put(Item(1, "alpha"))
+        self.conn.execute("BEGIN")
+        self.store.defer_keywords()
+        self.store.upsert([Item(2, "beta")], self.store.embed([Item(2, "beta")]))
+        self.conn.execute("COMMIT")
+        reopened = Store(self.conn, "docs", FIELDS, encoder=self.enc)
+        self.assertTrue(reopened.keywords_stale)
+        with self.assertRaises(StaleKeywords):
+            self.kw("beta", store=reopened)
+
+    def test_a_rolled_back_deferral_leaves_the_index_in_step(self) -> None:
+        self.put(Item(1, "alpha"))
+        self.conn.execute("BEGIN")
+        self.store.defer_keywords()
+        self.store.upsert([Item(2, "beta")], self.store.embed([Item(2, "beta")]))
+        self.conn.execute("ROLLBACK")
+        self.assertFalse(self.store.keywords_stale)
+        self.put(Item(3, "gamma"))
+        self.assertEqual([3], self.kw("gamma"))
+        self.conn.execute(
+            "INSERT INTO docs_fts(docs_fts, rank) VALUES ('integrity-check', 1)")
 
     def test_declared_metadata_is_typed_and_extra_is_kept(self) -> None:
         self.put(Item(1, "alpha", {"account": "work", "at": 5, "done": True,

@@ -102,18 +102,24 @@ Without an encoder the store is keyword-only and vector search raises.
   filtered.
 - `tokenizer` is one of `unicode61`, `porter`, `trigram`.
 
-**Tables.** Per store: `items` (id, text, keyword text, declared fields,
-`extra`), `vectors` (id, little-endian float16 blob), an FTS5 table with
-its own content, and a `meta` row holding the `VectorSpace`, the declared
-fields and a generation counter. They are created with individual
+**Tables.** Per store: `items` (id, text, keywords, keyword override,
+declared fields, `extra`), `vectors` (id, little-endian float16 blob), an
+FTS5 table, and a `meta` row holding the `VectorSpace`, the declared
+fields, the layout and a generation counter. Text is stored once: the
+FTS5 table uses external content, reading the keyword text through a view
+that derives it from `items`, and triggers on `items` keep the index in
+step with every write. A store written under another layout is refused on
+open. They are created with individual
 statements, never `executescript`, which would commit the caller's
 transaction.
 
 **Items.** An item has an integer `id` chosen by the consumer, `text`
-(what is embedded and returned), an optional `keyword_text` (what the
-keyword index reads; defaults to `text`), and metadata. repoglass puts
-path words in `keyword_text` without them reaching its embeddings; the
-knowledge store puts title, people and notes there.
+(what is embedded and returned), optional `keywords` (terms the keyword
+index reads before `text`), an optional `keyword_text` (what the keyword
+index reads instead of both), and metadata. Only `text` is embedded.
+repoglass puts path words in `keywords`; the knowledge store puts title,
+people and notes there. `keyword_text` is for a keyword rendering that is
+not `text` with terms added, and is stored only when set.
 
 **Writes.**
 
@@ -124,6 +130,8 @@ knowledge store puts title, people and notes there.
 | `remove(ids)` | deletes items, vectors and keyword rows |
 | `missing_vectors()` | ids of items stored without a vector |
 | `add_vectors(ids, vectors)` | attaches vectors to items already stored |
+| `defer_keywords()` | stops per-write keyword index updates until `sync_keywords` |
+| `sync_keywords()` | rebuilds the keyword index if writes were deferred |
 
 Encoding is slow, so it happens in `embed`, before the consumer opens its
 write transaction. A store without an encoder writes items with no
@@ -134,8 +142,13 @@ whose space matches the stored one, or precomputed `Vectors(space, rows)`
 checked the same way. The store never commits: `upsert` and `remove`
 require the caller to be inside a transaction, so an item, its vector,
 its keyword row and the consumer's own rows commit or roll back together.
-The FTS5 table is updated by explicit statements in the same transaction,
-so a rollback leaves it consistent. Every write bumps the generation
+The FTS5 table is updated by triggers in the same transaction, so a
+rollback leaves it consistent. A bulk load that commits in many
+transactions can instead `defer_keywords`, which marks the store stale in
+the caller's transaction and makes the triggers skip, then `sync_keywords`
+once at the end: one rebuild costs about half as much as per-write
+updates. `search_keyword` raises `StaleKeywords` while the mark is set, so
+a load that dies before the sync leaves the store stale, never wrong. Every write bumps the generation
 counter.
 
 **Vector space.** An empty store adopts the encoder's space on first
@@ -417,10 +430,9 @@ the same tables, FTS5 and filters.
 **Filtering on JSON metadata.** `json_extract` comparisons follow SQLite's
 loose typing and cannot be indexed per field; declared typed columns can.
 
-**External-content or contentless FTS5.** External content goes stale
-unless triggers or rebuilds keep it in step; contentless-delete needs a
-recent SQLite. Contentful FTS updated in the same transaction stays
-consistent through rollback.
+**Contentful or contentless FTS5.** Contentful FTS5 keeps its own copy of
+every keyword text, and a stored keyword text copies `text` again: three
+copies of each item's text. Contentless-delete needs SQLite 3.43.
 
 **Encoding inside `upsert`.** A model call inside the write transaction
 holds the database lock for as long as the model takes.

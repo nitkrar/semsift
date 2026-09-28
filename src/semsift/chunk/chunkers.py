@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import re
 from bisect import bisect_right
 from dataclasses import dataclass
+from functools import cache
 
 
 @dataclass(frozen=True)
@@ -23,10 +25,20 @@ class Chunk:
     symbols: tuple[str, ...] = ()
 
 
+#: A line break; its last character is where `_build` places the line end.
+_LINE_BREAK = re.compile(r"\r\n?|\n")
+
+
+@cache
+def _pack_languages() -> frozenset[str]:
+    import tree_sitter_language_pack as pack
+
+    return frozenset(pack.manifest_languages())
+
+
 def _build(text: str, spans: list[tuple[int, int]], min_chars: int,
            extras: dict[int, tuple[tuple[str, ...], tuple[str, ...]]] | None = None) -> list[Chunk]:
-    newlines = [i for i, ch in enumerate(text)
-                if ch == "\n" or (ch == "\r" and (i + 1 == len(text) or text[i + 1] != "\n"))]
+    newlines = [m.end() - 1 for m in _LINE_BREAK.finditer(text)]
     out = []
     for start, end in spans:
         body = text[start:end]
@@ -148,9 +160,7 @@ class LanguagePackChunker:
 
     def supports(self, language: str) -> bool:
         """Whether the pack knows `language`; its grammar may still need a download."""
-        import tree_sitter_language_pack as pack
-
-        return language in pack.manifest_languages()
+        return language in _pack_languages()
 
     def chunk(self, text: str, language: str) -> list[Chunk]:
         import tree_sitter_language_pack as pack
@@ -266,9 +276,7 @@ class TreeSitterPackChunker:
 
     def supports(self, language: str) -> bool:
         """Whether the pack knows `language`; its grammar may still need a download."""
-        import tree_sitter_language_pack as pack
-
-        return language in pack.manifest_languages()
+        return language in _pack_languages()
 
     def chunk(self, text: str, language: str) -> list[Chunk]:
         import tree_sitter_language_pack as pack
