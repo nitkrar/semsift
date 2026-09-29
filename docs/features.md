@@ -21,6 +21,7 @@ Sources: retriv (https://github.com/AmenRa/retriv), retrivo on PyPI
 | Embedding cache keyed on full text and `VectorSpace` | both Retrivos key on a text prefix or omit the model | design: embed | S |
 | FTS5 tokenizer as a store option (`porter` for prose) | retriv stemming and stopwords (`docs/text_preprocessing.md`) | design: store | S |
 | Accept precomputed vectors, still recording their `VectorSpace` | retriv `embeddings_path` (`dense_retriever.py`) | store `upsert` | S |
+| Cross-encoder reranker with a pair-score cache keyed on query, document and model | retrivo `retrivo/search/reranker.py` | design: rerank | M |
 | Allowlist of embedder model ids from the environment | semshift `SEMSHIFT_ALLOWED_MODELS` (`embeddings.py`) | embed | S |
 
 ## Evaluation
@@ -40,7 +41,6 @@ consumer brings its own labelled data.
 
 | Feature | From | Effort |
 |---|---|---|
-| Cross-encoder reranker with a pair-score cache keyed on query, document and model | retrivo `retrivo/search/reranker.py` | M |
 | Semantic-boundary chunking for prose (RAG pipeline, not semsift) | retrivo `retrivo/chunking/semantic.py` | M |
 
 ## Declined

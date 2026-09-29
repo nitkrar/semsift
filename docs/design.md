@@ -274,6 +274,17 @@ unique. When reranking leaves fewer than `k`, the result has fewer than
 | MMR | vectors | trades relevance against similarity to hits already chosen; relevance is min-max normalised before mixing |
 | metadata rules | declared fields | multiplies score by each matching rule's factor; matches compound; factors are finite and positive |
 | multiply | what `fn` reads | multiplies score by `fn(candidate)`, for weights computed in code (repoglass's path penalties); factors are finite and positive |
+| cross-encoder | text | scores the top `top` candidates (30 by default) with a model reading query and passage together; the new score is `sigmoid(logit)`, or blended with the normalised incoming score by `weight`; candidates past `top` are dropped; logits are cached per model, query and passage |
+
+The cross-encoder is a model that returns a number, so it is in scope. It
+runs through onnxruntime (the `onnx` extra), by default
+`cross-encoder/ms-marco-MiniLM-L6-v2`: as accurate as the L12 model on
+its model card (NDCG@10 74.30 against 74.31) at about twice the speed. A
+consumer can pass its own pair scorer instead. On an Apple silicon CPU it
+takes about 80 ms for 10 candidates and 250 ms for 30; the `qint8_arm64`
+graph halves that, with logits that move slightly. It is trained on web
+search passages, so it suits prose more than code, and helps only where
+a labelled query set shows it does.
 
 Recency ranks; it does not decide what is current. A consumer with
 superseded records (the knowledge store's memories) filters inactive
