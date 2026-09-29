@@ -28,8 +28,10 @@ class CrossEncoder:
     logits. Logits are cached per (model, query, passage), up to
     `cache_size` pairs.
 
-    `providers` defaults to CPU: on Apple silicon CoreML takes only part of
-    this graph and runs about three times slower than CPU.
+    `providers` defaults to WebGPU, which needs the `webgpu` extra and on
+    Apple silicon scores 30 passages two to three and a half times faster
+    than CPU. `auto` picks CoreML there, which takes only part of this graph
+    and runs about three times slower than CPU.
     """
 
     needs = frozenset({"text"})
@@ -37,7 +39,7 @@ class CrossEncoder:
     def __init__(self, model: str = "cross-encoder/ms-marco-MiniLM-L6-v2", *,
                  top: int = 30, weight: float = 1.0, cache_size: int = 4096,
                  local_only: bool = False, filename: str = "onnx/model.onnx",
-                 providers: str = "cpu",
+                 providers: str = "webgpu",
                  scorer: Callable[[Sequence[tuple[str, str]]], Sequence[float]] | None = None
                  ) -> None:
         if isinstance(top, bool) or not isinstance(top, int) or top <= 0:

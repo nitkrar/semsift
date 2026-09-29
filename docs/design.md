@@ -280,9 +280,12 @@ The cross-encoder is a model that returns a number, so it is in scope. It
 runs through onnxruntime (the `onnx` extra), by default
 `cross-encoder/ms-marco-MiniLM-L6-v2`: as accurate as the L12 model on
 its model card (NDCG@10 74.30 against 74.31) at about twice the speed. A
-consumer can pass its own pair scorer instead. On an Apple silicon CPU it
-takes about 80 ms for 10 candidates and 250 ms for 30; the `qint8_arm64`
-graph halves that, with logits that move slightly. It is trained on web
+consumer can pass its own pair scorer instead. It defaults to the WebGPU
+provider (the `webgpu` extra): on Apple silicon, 30 passages of about 700
+characters take 68 ms against 253 ms on CPU, and 30 full-length code
+chunks 262 ms against 594 ms, with identical logits. CoreML, which `auto`
+picks there, is about three times slower than CPU. On CPU the
+`qint8_arm64` graph halves the time, with logits that move slightly. It is trained on web
 search passages, so it suits prose more than code, and helps only where
 a labelled query set shows it does.
 
