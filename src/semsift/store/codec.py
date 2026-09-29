@@ -20,7 +20,9 @@ def pack(vector: Sequence[float], dtype: str = VECTOR_DTYPE) -> bytes:
         raise ValueError("a vector must have at least one component")
     if not np.isfinite(v).all():
         raise ValueError("a vector must contain only finite components")
-    norm = float(np.linalg.norm(v))
+    # Summed by numpy in float64, not by BLAS: BLAS kernels differ by CPU
+    # and platform, and their rounding would reach the stored bytes.
+    norm = float(np.sqrt(np.add.reduce(v.astype("float64") ** 2)))
     if norm:
         v = v / norm
     return v.astype(dtype).tobytes()

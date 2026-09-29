@@ -43,7 +43,7 @@ def _unit_query(vector: Sequence[float], width: int):
     q = np.asarray(vector, dtype="float32")
     if q.shape != (width,):
         raise ValueError(f"query shape {q.shape} against stored width {width}")
-    norm = float(np.linalg.norm(q))
+    norm = float(np.sqrt(np.add.reduce(q.astype("float64") ** 2)))
     return q / norm if norm else q
 
 
@@ -68,7 +68,10 @@ class Exhaustive:
         n = len(self._ids)
         if n == 0 or k <= 0:
             return []
-        scores = self._vectors @ _unit_query(vector, self._width)
+        # Summed by numpy rather than a BLAS matrix product, whose kernels
+        # differ by shape, CPU and platform, so a row's score is the same
+        # wherever the index is searched.
+        scores = np.add.reduce(self._vectors * _unit_query(vector, self._width), axis=1)
         if k < n - 1:
             cut = np.argpartition(-scores, k)[:k + 1]
             # Everything tied with the weakest of that set, so the id

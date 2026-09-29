@@ -40,6 +40,23 @@ class PackingTests(unittest.TestCase):
         self.assertTrue(
             np.allclose([x / norm for x in v], back, atol=1e-3))
 
+    def test_packed_bytes_do_not_depend_on_the_blas_library(self) -> None:
+        """The norm is summed in float64 by numpy, not by BLAS, whose
+        kernels differ by CPU and platform, so one vector packs to the
+        same bytes everywhere. The expected bytes use an exact sum."""
+        import math
+        import random
+
+        import numpy as np
+
+        rng = random.Random(0)
+        for _ in range(2000):
+            v = np.asarray([rng.gauss(0.0, 0.06) for _ in range(256)], dtype="float32")
+            norm = math.sqrt(math.fsum(float(x) * float(x) for x in v))
+            want = (v / np.float32(norm)).astype("<f2").tobytes()
+            self.assertEqual(want, pack(v.tolist()))
+
+
 class UnpackTests(unittest.TestCase):
     def test_rows_become_a_matrix(self) -> None:
         m = unpack([pack([3.0, 4.0]), pack([0.0, 2.0])])

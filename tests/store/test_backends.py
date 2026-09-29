@@ -54,6 +54,21 @@ class ContractTests(unittest.TestCase):
                     backend([1], [[1.0, 0.0]]).query([1.0, 0.0, 0.0], 1)
 
 
+class ExhaustiveDeterminismTests(unittest.TestCase):
+    def test_a_rows_score_does_not_depend_on_the_other_rows(self) -> None:
+        """Scores are summed by numpy, not BLAS, whose kernels differ by
+        matrix shape, CPU and platform: a row scores the same alone as
+        among 500 others."""
+        import random
+
+        rng = random.Random(1)
+        rows = [[rng.gauss(0.0, 0.06) for _ in range(256)] for _ in range(500)]
+        query = [rng.gauss(0.0, 0.06) for _ in range(256)]
+        together = dict(vindex.Exhaustive(list(range(500)), rows).query(query, 500))
+        alone = {i: vindex.Exhaustive([i], [rows[i]]).query(query, 1)[0][1] for i in range(500)}
+        self.assertEqual(alone, together)
+
+
 class RecallTests(unittest.TestCase):
     def test_approximate_backends_find_most_true_neighbours(self) -> None:
         import numpy as np
