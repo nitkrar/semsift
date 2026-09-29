@@ -295,5 +295,63 @@ class RerankerContractTests(Fixture):
         self.assertEqual(evidence, result.hits[0].evidence)
 
 
+class ContextPackingTests(unittest.TestCase):
+    """What reaches the caller's context: one hit per document, within a
+    character budget, chosen after reranking."""
+
+    #: id -> (document, text). The source ranks them in id order.
+    ROWS = {1: ("mail-a", "a" * 30), 2: ("mail-a", "b" * 30), 3: ("mail-b", "c" * 30),
+            4: (None, "d" * 30), 5: (None, "e" * 30), 6: ("mail-c", "f" * 30)}
+
+    def setUp(self) -> None:
+        self.conn = sqlite3.connect(":memory:", isolation_level=None)
+        self.store = Store(self.conn, "p", [Field("doc", "text")])
+        self.conn.execute("BEGIN")
+        self.store.upsert([Item(i, text, {"doc": doc}) for i, (doc, text) in self.ROWS.items()])
+        self.conn.execute("COMMIT")
+
+    def run_search(self, k, **kw):
+        search = Search(self.store, sources=[Recorder(sorted(self.ROWS))], depth=6, **kw)
+        return search.run("q", k)
+
+    def test_one_hit_per_document_keeps_the_best_ranked(self) -> None:
+        res = self.run_search(10, distinct_by="doc")
+        self.assertEqual([1, 3, 4, 5, 6], [h.id for h in res.hits])
+
+    def test_hits_without_the_field_are_never_grouped(self) -> None:
+        res = self.run_search(10, distinct_by="doc")
+        self.assertEqual([4, 5], [h.id for h in res.hits if h.metadata["doc"] is None])
+
+    def test_k_counts_documents_not_chunks(self) -> None:
+        # Unpacked, the top two are both chunks of mail-a.
+        self.assertEqual([1, 2], [h.id for h in self.run_search(2).hits])
+        self.assertEqual([1, 3], [h.id for h in self.run_search(2, distinct_by="doc").hits])
+
+    def test_the_budget_stops_before_the_hit_that_would_overflow(self) -> None:
+        res = self.run_search(10, max_chars=95)
+        self.assertEqual([1, 2, 3], [h.id for h in res.hits])
+        self.assertEqual((), res.warnings)
+
+    def test_the_first_hit_is_kept_over_budget_with_a_warning(self) -> None:
+        res = self.run_search(10, max_chars=10)
+        self.assertEqual([1], [h.id for h in res.hits])
+        self.assertEqual(1, len(res.warnings))
+        self.assertIn("max_chars", res.warnings[0])
+
+    def test_packing_and_budget_combine(self) -> None:
+        res = self.run_search(10, distinct_by="doc", max_chars=65)
+        self.assertEqual([1, 3], [h.id for h in res.hits])
+
+    def test_the_distinct_field_must_be_declared(self) -> None:
+        with self.assertRaisesRegex(ValueError, "distinct_by"):
+            Search(self.store, sources=[], distinct_by="missing")
+
+    def test_the_budget_is_a_positive_integer(self) -> None:
+        for bad in (0, -1, True, 2.5):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(ValueError, "max_chars"):
+                    Search(self.store, sources=[], max_chars=bad)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -30,7 +30,7 @@ Both run the same flow:
 ```
 write:  files → chunk → embed (outside the transaction) → store
 query:  query → store vector search  ┐
-                store keyword search ┼→ fuse → hydrate top N → rerank → hits
+                store keyword search ┼→ fuse → hydrate top N → rerank → pack → hits
                 consumer sources ────┘
 ```
 
@@ -296,7 +296,17 @@ ignores it cannot widen the result; the knowledge store puts its account
 scope there. A filter or database error raises; any other source failure
 skips that source with a warning, and raises if every source failed. The composer runs the
 sources, fuses, fetches the fields the rerankers need for the top
-candidates in one read, runs the rerankers in order and cuts to `k`.
+candidates in one read, runs the rerankers in order, packs and cuts to
+`k`.
+
+Packing shapes what reaches the caller's context, and is off unless
+asked for. `distinct_by` names a declared field, a document key say, and
+keeps the best-ranked hit for each of its values, so one long document
+cannot fill every slot; a hit with no value in that field is never
+grouped. `max_chars` stops before the hit whose text would take the total
+past the budget, always keeping the first hit and warning when it alone
+is over. `k` then counts what is left, so packing can return fewer than
+`k` hits when the candidate depth holds few distinct values.
 
 A result carries:
 
@@ -304,8 +314,8 @@ A result carries:
   as its citation fields (a durable key and a span);
 - evidence per hit;
 - `warnings`: facts about a degraded result, such as a source that failed
-  and was skipped, a drifted encoder, or fewer than `k` hits after
-  reranking. A filter or
+  and was skipped, a drifted encoder, fewer than `k` hits after
+  reranking, or a first hit over `max_chars`. A filter or
   scope failure is never a warning; it raises.
 
 ### chunk

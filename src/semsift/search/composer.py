@@ -63,19 +63,33 @@ class Search:
     `base_filter` is ANDed with every request's filter, given to every
     source, and applied again when candidates are hydrated, so a source
     that ignores it cannot widen the result.
+
+    After reranking, the hits are packed for the caller's context:
+    `distinct_by` keeps the best-ranked hit for each value of a declared
+    field (a document key, say), leaving hits without a value ungrouped,
+    and `max_chars` stops before the hit whose text would take the total
+    past the budget. The first hit is always kept. `k` then counts what
+    is left. Packing can leave fewer than `k` hits when the candidate
+    depth holds few distinct values; raise `depth` for more.
     """
 
     def __init__(self, store: Store, *, sources: Sequence[Source],
                  fuser: Callable[[Sequence[RankedList]], Fused] = rrf,
                  rerankers: Sequence[Reranker] = (), depth: int | None = None,
                  base_filter: f.Filter | None = None,
-                 citation: Sequence[str] = ()) -> None:
+                 citation: Sequence[str] = (), distinct_by: str | None = None,
+                 max_chars: int | None = None) -> None:
         if (depth is not None
                 and (isinstance(depth, bool) or not isinstance(depth, int) or depth < 0)):
             raise ValueError("depth must be a non-negative integer")
         unknown = set(citation) - set(store.kinds)
         if unknown:
             raise ValueError(f"citation fields {sorted(unknown)} are not declared")
+        if distinct_by is not None and distinct_by not in store.kinds:
+            raise ValueError(f"distinct_by field {distinct_by!r} is not declared")
+        if max_chars is not None and (isinstance(max_chars, bool)
+                                      or not isinstance(max_chars, int) or max_chars <= 0):
+            raise ValueError("max_chars must be a positive integer")
         self.store = store
         self.sources = tuple(sources)
         self.fuser = fuser
@@ -83,6 +97,8 @@ class Search:
         self.depth = depth
         self.base_filter = base_filter
         self.citation = tuple(citation)
+        self.distinct_by = distinct_by
+        self.max_chars = max_chars
 
     def _filter(self, request: f.Filter | None) -> f.Filter | None:
         parts = [p for p in (self.base_filter, request) if p is not None]
@@ -148,6 +164,7 @@ class Search:
                 raise ValueError(f"{type(reranker).__name__} replaced candidate fields")
         if len(candidates) < k and hydrated >= k:
             warnings.append(f"reranking left {len(candidates)} of {k} hits")
+        candidates = self._pack(candidates, k, warnings)
 
         hits = tuple(
             Hit(c.id, c.score, records[c.id].text, records[c.id].metadata,
@@ -155,6 +172,33 @@ class Search:
                 tuple(fused.evidence.get(c.id, ())))
             for c in candidates[:k])
         return Result(hits, tuple(warnings))
+
+    def _pack(self, candidates: list[Candidate], k: int,
+              warnings: list[str]) -> list[Candidate]:
+        """The best hit per `distinct_by` value, then as many as fit `max_chars`."""
+        if self.distinct_by is not None:
+            seen: set = set()
+            kept = []
+            for c in candidates:
+                value = c.metadata.get(self.distinct_by)
+                if value is not None:
+                    if value in seen:
+                        continue
+                    seen.add(value)
+                kept.append(c)
+            candidates = kept
+        if self.max_chars is not None and k:
+            total, kept = 0, []
+            for c in candidates:
+                if kept and total + len(c.text) > self.max_chars:
+                    break
+                total += len(c.text)
+                kept.append(c)
+            if len(kept) == 1 and total > self.max_chars:
+                warnings.append(f"the first hit alone is {total} characters,"
+                                f" over max_chars {self.max_chars}")
+            candidates = kept
+        return candidates
 
     @staticmethod
     def _validate_fused(fused: Fused, lists: Sequence[RankedList]) -> None:
