@@ -124,6 +124,10 @@ class StaticEncoder(_PrefixMixin):
         self.name = model
         self._prefixes(query_prefix, doc_prefix)
         self._model = StaticModel.from_pretrained(resolve_model_source(model))
+        # Some tokenizer configs pad a batch to its longest text, and
+        # model2vec averages the padding into each vector, so a text's
+        # vector would depend on what shares its batch.
+        self._model.tokenizer.no_padding()
         self.dims = int(self._model.dim)
 
     def _encode(self, texts: Sequence[str]) -> list[Sequence[float]]:

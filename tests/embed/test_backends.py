@@ -148,6 +148,33 @@ class PoolingTests(unittest.TestCase):
         self.assertEqual("mean", policy.default_pooling("nomic-ai/CodeRankEmbed"))
 
 
+class StaticEncoderTests(unittest.TestCase):
+    """Guarded: needs a cached model. Skips, never fails, so the suite
+    stays offline-safe."""
+
+    MODEL = "minishlab/potion-code-16M-v2"
+
+    def setUp(self) -> None:
+        from huggingface_hub import hf_hub_download
+        from huggingface_hub.errors import LocalEntryNotFoundError
+
+        try:
+            for name in ("tokenizer.json", "model.safetensors", "config.json"):
+                hf_hub_download(self.MODEL, name, local_files_only=True)
+        except LocalEntryNotFoundError:
+            self.skipTest("model unavailable")
+        self.emb = embeddings.StaticEncoder(self.MODEL)
+
+    def test_a_vector_does_not_depend_on_its_batch(self) -> None:
+        """The model's tokenizer pads a batch to its longest text, and
+        model2vec averages the padding in, so a short text beside a long
+        one came out different from the same text alone."""
+        short = "def add(a, b): return a + b"
+        alone = self.emb.encode([short])[0]
+        batched = self.emb.encode([short, "word " * 400])[0]
+        self.assertEqual(list(alone), list(batched))
+
+
 class OnnxEncoderTests(unittest.TestCase):
     """Guarded: needs onnxruntime and a cached model. Skips, never fails,
     so the suite stays offline-safe."""
