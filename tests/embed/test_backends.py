@@ -380,7 +380,9 @@ class ProviderAttachmentTests(unittest.TestCase):
     def test_default_does_not_require_the_webgpu_extra(self) -> None:
         default = inspect.signature(
             embeddings.OnnxEncoder).parameters["providers"].default
-        self.assertEqual("auto", default)
+        self.assertEqual("best", default)
+        with unittest.mock.patch.object(backends, "_webgpu", side_effect=ImportError):
+            self.assertIn(backends._best(_FakeOrt()), ("cpu", "CUDAExecutionProvider"))
 
     def test_webgpu_attaches_by_device_and_never_by_name(self) -> None:
         name = "WebGpuExecutionProvider"

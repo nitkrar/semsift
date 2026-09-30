@@ -252,7 +252,7 @@ class OnnxEncoder(_PrefixMixin):
 
     def __init__(self, repo_id: str, *, local_only: bool = False,
                  pooling: str | None = None, filename: str = "onnx/model.onnx",
-                 providers: str = "auto", query_prefix: str | None = None,
+                 providers: str = "best", query_prefix: str | None = None,
                  doc_prefix: str | None = None) -> None:
         try:
             import onnxruntime as ort
@@ -392,7 +392,38 @@ def _webgpu(ort) -> str:
     return _WEBGPU_NAME
 
 
+def _webgpu_device(ort) -> bool:
+    """Whether the WebGPU plugin is installed and exposes a device."""
+    try:
+        name = _webgpu(ort)
+    except ImportError:
+        return False
+    return any(d.ep_name == name for d in ort.get_ep_devices())
+
+
+def _best(ort) -> str:
+    """The provider for this machine, from what it is rather than a timing.
+
+    A Mac with a WebGPU device takes WebGPU; a machine whose onnxruntime
+    offers CUDA takes CUDA; anything else takes the CPU. Never CoreML: on
+    Apple silicon it takes only part of these graphs and runs slower than
+    the CPU.
+    """
+    import platform
+
+    if platform.system() == "Darwin" and _webgpu_device(ort):
+        return "webgpu"
+    if "CUDAExecutionProvider" in ort.get_available_providers():
+        return "CUDAExecutionProvider"
+    return "cpu"
+
+
 def _session(ort, path: str, choice: str):
+    """An inference session on the chosen provider; `best` picks one."""
+    return _open(ort, path, _best(ort) if choice == "best" else choice)
+
+
+def _open(ort, path: str, choice: str):
     """An inference session bound to the chosen execution provider.
 
     webgpu ships as a plugin provider, which `providers=` cannot reach:

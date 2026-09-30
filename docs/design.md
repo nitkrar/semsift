@@ -81,6 +81,16 @@ so an encoder must be safe to call concurrently; the shipped ones are.
   what decides whether two stored vectors are comparable. `variant` is the
   ONNX graph file or the HTTP endpoint. `VectorSpace.of(...)` computes it
   without loading a model, except `dims`.
+- The ONNX models (`OnnxEncoder`, and the cross-encoder reranker) take a
+  `providers` argument, `best` by default: WebGPU on a Mac whose `webgpu`
+  extra exposes a device, CUDA where onnxruntime offers it, otherwise the
+  CPU. It reads the platform and the providers onnxruntime lists (about
+  4 ms, once, when the model is built) and never runs the model to decide.
+  CoreML is never picked: on Apple silicon it takes only part of these
+  graphs and runs about three times slower than the CPU. Naming a
+  provider (`webgpu`, `cpu`, `auto`, an onnxruntime name) uses exactly
+  that one, and a WebGPU plugin with no device raises instead of falling
+  back.
 - An embedding cache, when used, keys document vectors on
   `(space, "document", text)` and query vectors on
   `(space, "query", query_prefix, text)`. The query prefix is outside the
@@ -280,12 +290,12 @@ The cross-encoder is a model that returns a number, so it is in scope. It
 runs through onnxruntime (the `onnx` extra), by default
 `cross-encoder/ms-marco-MiniLM-L6-v2`: as accurate as the L12 model on
 its model card (NDCG@10 74.30 against 74.31) at about twice the speed. A
-consumer can pass its own pair scorer instead. It defaults to the WebGPU
-provider (the `webgpu` extra): on Apple silicon, 30 passages of about 700
-characters take 68 ms against 253 ms on CPU, and 30 full-length code
-chunks 262 ms against 594 ms, with identical logits. CoreML, which `auto`
-picks there, is about three times slower than CPU. On CPU the
-`qint8_arm64` graph halves the time, with logits that move slightly. It is trained on web
+consumer can pass its own pair scorer instead. It runs on the provider
+`best` picks (see embed). On Apple silicon, 30 passages of about 700
+characters take 68 ms on WebGPU against 253 ms on CPU, and 30
+full-length code chunks 262 ms against 594 ms, with identical logits. On
+CPU the `qint8_arm64` graph halves the time, with logits that move
+slightly. It is trained on web
 search passages, so it suits prose more than code, and helps only where
 a labelled query set shows it does.
 
