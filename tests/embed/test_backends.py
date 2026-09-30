@@ -367,7 +367,15 @@ class ProviderAttachmentTests(unittest.TestCase):
     def test_a_named_provider_goes_through_the_providers_argument(self) -> None:
         sess = backends._session(_FakeOrt(), "m.onnx", "cpu")
         self.assertEqual(["CPUExecutionProvider"], sess.providers)
-        self.assertIsNone(sess.arg)
+        self.assertIsNone(sess.arg.devices)
+
+    def test_sessions_log_errors_only(self) -> None:
+        name = "WebGpuExecutionProvider"
+        with unittest.mock.patch.object(backends, "_webgpu", return_value=name):
+            sessions = [backends._session(_FakeOrt(), "m.onnx", "cpu"),
+                        backends._session(_FakeOrt(devices=[_FakeDevice(name)]),
+                                          "m.onnx", "webgpu")]
+        self.assertEqual([3, 3], [sess.arg.log_severity_level for sess in sessions])
 
     def test_default_does_not_require_the_webgpu_extra(self) -> None:
         default = inspect.signature(

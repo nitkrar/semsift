@@ -400,8 +400,12 @@ def _session(ort, path: str, choice: str):
     session runs on CPU reporting success. Plugins attach by device
     instead, so they take a separate path rather than a longer list.
     """
+    # Errors only: session setup otherwise logs, at warning level, every
+    # node a provider hands back to the CPU, which is routine.
+    opts = ort.SessionOptions()
+    opts.log_severity_level = 3
     if choice != "webgpu":
-        return ort.InferenceSession(path, providers=_providers(ort, choice))
+        return ort.InferenceSession(path, opts, providers=_providers(ort, choice))
     name = _webgpu(ort)
     devices = [d for d in ort.get_ep_devices() if d.ep_name == name]
     if not devices:
@@ -409,7 +413,6 @@ def _session(ort, path: str, choice: str):
             f"{name} registered but exposes no device; "
             "use providers='cpu'"
         )
-    opts = ort.SessionOptions()
     opts.add_provider_for_devices(devices, {})
     return ort.InferenceSession(path, opts)
 
